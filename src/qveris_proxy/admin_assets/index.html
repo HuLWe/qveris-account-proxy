@@ -28,6 +28,7 @@
     <main>
       <nav class="tabs" aria-label="管理视图">
         <button type="button" class="tab active" data-tab="status">运行状态</button>
+        <button type="button" class="tab" data-tab="proxy-keys">代理 Key</button>
         <button type="button" class="tab" data-tab="config">账号配置</button>
         <button type="button" class="tab" data-tab="console">接口测试</button>
       </nav>
@@ -126,6 +127,38 @@
           </div>
         </section>
 
+        <section class="panel" data-panel="proxy-keys">
+          <div class="section-heading">
+            <div>
+              <h1>代理 API Key</h1>
+              <p id="proxy-key-summary">尚未加载</p>
+            </div>
+            <div class="actions">
+              <button type="button" class="secondary" id="refresh-proxy-keys">刷新</button>
+              <button type="button" id="create-proxy-key">创建 Key</button>
+            </div>
+          </div>
+
+          <div class="metrics" id="proxy-key-metrics"></div>
+          <div class="table-wrap">
+            <table class="proxy-key-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>Key</th>
+                  <th>状态</th>
+                  <th>用量</th>
+                  <th>RPM</th>
+                  <th>并发</th>
+                  <th>到期</th>
+                  <th class="command-column">操作</th>
+                </tr>
+              </thead>
+              <tbody id="proxy-keys"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="panel" data-panel="config">
           <div class="section-heading">
             <div>
@@ -196,6 +229,64 @@
         </section>
       </div>
     </main>
+
+    <dialog class="key-dialog" id="proxy-key-editor">
+      <form method="dialog" id="proxy-key-form">
+        <div class="dialog-heading">
+          <div>
+            <h2 id="proxy-key-editor-title">创建代理 Key</h2>
+            <p id="proxy-key-editor-kind">新 Key</p>
+          </div>
+          <button type="button" class="icon-button secondary" id="close-proxy-key-editor" aria-label="关闭">×</button>
+        </div>
+        <div class="key-form-grid">
+          <label>
+            名称
+            <input id="proxy-key-name" type="text" maxlength="64" autocomplete="off" required>
+          </label>
+          <label>
+            最大并发
+            <input id="proxy-key-concurrency" type="number" min="1" max="1024" value="8" required>
+          </label>
+          <label>
+            总用量上限
+            <input id="proxy-key-request-limit" type="number" min="1" max="1000000000000" placeholder="不限">
+          </label>
+          <label>
+            每分钟请求
+            <input id="proxy-key-rpm" type="number" min="1" max="1000000" placeholder="不限">
+          </label>
+          <label class="key-form-wide">
+            到期时间
+            <input id="proxy-key-expires" type="datetime-local">
+          </label>
+          <label class="switch-row key-form-wide">
+            <input id="proxy-key-enabled" type="checkbox" checked>
+            <span>启用此 Key</span>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" class="secondary" id="cancel-proxy-key-editor">取消</button>
+          <button type="submit" id="save-proxy-key">创建</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="key-dialog secret-dialog" id="proxy-key-secret-dialog">
+      <div class="dialog-heading">
+        <div>
+          <h2>代理 API Key 已创建</h2>
+          <p>明文仅显示一次</p>
+        </div>
+      </div>
+      <div class="created-key-value">
+        <code id="created-proxy-key"></code>
+        <button type="button" class="secondary" id="copy-created-proxy-key">复制</button>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="close-proxy-key-secret">完成</button>
+      </div>
+    </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script src="/admin/assets/admin.js?v=__ADMIN_JS_VERSION__" defer></script>

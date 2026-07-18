@@ -22,6 +22,10 @@ credential values out of commands, logs, Git, and responses.
   cookies, private keys, or secret mount contents. The account configuration
   may be streamed only into hash and byte-count tools for integrity checks;
   never send its bytes to the terminal or model output.
+- Treat `/data/state.db` as protected credential state. It contains managed
+  proxy-key hashes, limits, usage, and browser claims. Verify only its mount,
+  ownership, existence, and SQLite integrity; never dump tables, rows, hashes,
+  or key metadata to logs or responses.
 - Never run `down -v`, `docker volume prune`, `docker system prune -a`, or
   `git clean -fdx`. Treat `config`, `/data`, `/run/secrets`,
   `/run/account-secrets`, and their host sources as protected data.
@@ -50,8 +54,9 @@ credential values out of commands, logs, Git, and responses.
 3. Record the running image ID, container health, ports, restart policy, and
    exact mount sources. Capture the account configuration file's size and
    SHA-256 into a mode-0600 transaction file for a post-deploy equality check;
-   do not print or parse its contents. Never read credential files or print
-   secret-bearing environment values.
+   do not print or parse its contents. Record whether the state database exists
+   and passes `PRAGMA quick_check` without querying application tables. Never
+   read credential files or print secret-bearing environment values.
 4. Make the smallest repository change and add tests proportional to its
    impact. Run JavaScript syntax checks for admin UI changes plus Ruff and the
    relevant pytest suite; run the full suite before release.
@@ -68,9 +73,10 @@ credential values out of commands, logs, Git, and responses.
    new image while the old container remains running, then recreate only the
    proxy service after the build succeeds.
 9. Verify the new image ID, `healthy` state, restart policy, unchanged mounts,
-   unchanged account-configuration hash, clean startup logs, `/health/live`,
-   `/health/ready`, and a static UI marker. Do not open `/admin/` during
-   unattended validation when first-browser claim may still be unused.
+   unchanged account-configuration hash, state-database integrity, clean
+   startup logs, `/health/live`, `/health/ready`, and a static UI marker. Do not
+   open `/admin/` during unattended validation when first-browser claim may
+   still be unused.
 10. On failure, restore the backed-up source and Compose files first, retag the
     rollback image as `local`, recreate the same service with the same mounts
     and environment, and repeat configuration-hash and health checks. Do not
@@ -103,6 +109,6 @@ claim.
 ## Completion Report
 
 State what changed, how it was tested, deployed image/commit identity, retained
-data resources, cleanup results, rollback availability, and any remaining
-unverified item. Provide the management URL and API base URL without including
-the proxy key.
+account and managed proxy-key state, cleanup results, rollback availability,
+and any remaining unverified item. Provide the management URL and API base URL
+without including any proxy key.

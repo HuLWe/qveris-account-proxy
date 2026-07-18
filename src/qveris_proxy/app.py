@@ -6,12 +6,22 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from typing import TypeVar
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .access_keys import (
+    PrimaryProxyAccessKeyRequired,
+    PROXY_ACCESS_KEY_CONCURRENCY_MAX,
+    PROXY_ACCESS_KEY_EXPIRES_AT_MAX,
+    PROXY_ACCESS_KEY_NAME_MAX_LENGTH,
+    PROXY_ACCESS_KEY_REQUEST_LIMIT_MAX,
+    PROXY_ACCESS_KEY_RPM_MAX,
+    ProxyAccessKeyNotFound,
+)
 from .admin import ADMIN_CONFIG_MAX_BYTES, AdminConfigError
 from .admin_ui import router as admin_ui_router
 from .bootstrap import (
@@ -39,6 +49,64 @@ _BOOTSTRAP_NO_STORE_HEADERS = {
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
 }
+_PROXY_KEY_PAYLOAD_MAX_BYTES = 16 * 1024
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+class _ProxyKeyCreateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1, max_length=PROXY_ACCESS_KEY_NAME_MAX_LENGTH)
+    enabled: bool = True
+    request_limit: int | None = Field(
+        default=None, ge=1, le=PROXY_ACCESS_KEY_REQUEST_LIMIT_MAX
+    )
+    requests_per_minute: int | None = Field(
+        default=None, ge=1, le=PROXY_ACCESS_KEY_RPM_MAX
+    )
+    max_concurrency: int = Field(default=8, ge=1, le=PROXY_ACCESS_KEY_CONCURRENCY_MAX)
+    expires_at: int | float | None = Field(
+        default=None,
+        gt=0,
+        le=PROXY_ACCESS_KEY_EXPIRES_AT_MAX,
+    )
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("name must not be blank")
+        return normalized
+
+
+class _ProxyKeyUpdateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(
+        default="", min_length=1, max_length=PROXY_ACCESS_KEY_NAME_MAX_LENGTH
+    )
+    enabled: bool = False
+    request_limit: int | None = Field(
+        default=None, ge=1, le=PROXY_ACCESS_KEY_REQUEST_LIMIT_MAX
+    )
+    requests_per_minute: int | None = Field(
+        default=None, ge=1, le=PROXY_ACCESS_KEY_RPM_MAX
+    )
+    max_concurrency: int = Field(default=8, ge=1, le=PROXY_ACCESS_KEY_CONCURRENCY_MAX)
+    expires_at: int | float | None = Field(
+        default=None,
+        gt=0,
+        le=PROXY_ACCESS_KEY_EXPIRES_AT_MAX,
+    )
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("name must not be blank")
+        return normalized
 
 
 def create_app(
@@ -134,6 +202,82 @@ def create_app(
             "accounts": await service.account_status(),
             "credential_reload": asdict(await service.credential_reload_status()),
         }
+
+    @application.get("/admin/v1/proxy-keys", include_in_schema=False)
+    async def list_proxy_keys(
+        request: Request, response: Response
+    ) -> dict[str, object]:
+        service = request.app.state.proxy_service
+        service.authenticate(request)
+        response.headers["Cache-Control"] = "no-store"
+        return {"keys": [asdict(key) for key in await service.proxy_access_keys.list()]}
+
+    @application.post("/admin/v1/proxy-keys", include_in_schema=False)
+    async def create_proxy_key(
+        request: Request, response: Response
+    ) -> dict[str, object]:
+        service = request.app.state.proxy_service
+        service.authenticate(request)
+        response.headers.update(_BOOTSTRAP_NO_STORE_HEADERS)
+        payload = await _read_proxy_key_payload(request, _ProxyKeyCreateInput)
+        try:
+            created = await service.proxy_access_keys.create(
+                payload.name,
+                enabled=payload.enabled,
+                request_limit=payload.request_limit,
+                requests_per_minute=payload.requests_per_minute,
+                max_concurrency=payload.max_concurrency,
+                expires_at=payload.expires_at,
+            )
+        except ValueError:
+            _raise_proxy_key_error("invalid_proxy_access_key")
+        return {"key": asdict(created.key), "secret": created.secret}
+
+    @application.patch("/admin/v1/proxy-keys/{key_id}", include_in_schema=False)
+    async def update_proxy_key(
+        key_id: str, request: Request, response: Response
+    ) -> dict[str, object]:
+        service = request.app.state.proxy_service
+        service.authenticate(request)
+        response.headers["Cache-Control"] = "no-store"
+        payload = await _read_proxy_key_payload(request, _ProxyKeyUpdateInput)
+        if not payload.model_fields_set:
+            _raise_proxy_key_error("empty_proxy_access_key_update")
+        changes = {field: getattr(payload, field) for field in payload.model_fields_set}
+        try:
+            key = await service.proxy_access_keys.update(key_id, **changes)
+        except (ProxyAccessKeyNotFound, ValueError) as exc:
+            _raise_proxy_key_exception(exc)
+        return {"key": asdict(key)}
+
+    @application.delete("/admin/v1/proxy-keys/{key_id}", include_in_schema=False)
+    async def delete_proxy_key(
+        key_id: str, request: Request, response: Response
+    ) -> dict[str, str]:
+        service = request.app.state.proxy_service
+        service.authenticate(request)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            await service.proxy_access_keys.delete(key_id)
+        except (ProxyAccessKeyNotFound, PrimaryProxyAccessKeyRequired) as exc:
+            _raise_proxy_key_exception(exc)
+        return {"deleted": key_id}
+
+    @application.post(
+        "/admin/v1/proxy-keys/{key_id}/reset-usage",
+        include_in_schema=False,
+    )
+    async def reset_proxy_key_usage(
+        key_id: str, request: Request, response: Response
+    ) -> dict[str, object]:
+        service = request.app.state.proxy_service
+        service.authenticate(request)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            key = await service.proxy_access_keys.reset_usage(key_id)
+        except ProxyAccessKeyNotFound as exc:
+            _raise_proxy_key_exception(exc)
+        return {"key": asdict(key)}
 
     @application.post("/admin/v1/bootstrap-ticket", include_in_schema=False)
     async def create_admin_bootstrap_ticket(
@@ -364,6 +508,62 @@ async def _read_admin_payload(request: Request) -> bytes:
         if len(payload) > ADMIN_CONFIG_MAX_BYTES:
             raise HTTPException(status_code=413, detail="configuration is too large")
     return bytes(payload)
+
+
+async def _read_proxy_key_payload(request: Request, model: type[_ModelT]) -> _ModelT:
+    media_type = (
+        request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    )
+    if media_type != "application/json":
+        raise HTTPException(
+            status_code=415,
+            detail="proxy API key settings must use application/json",
+        )
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="invalid Content-Length"
+            ) from None
+        if declared < 0:
+            raise HTTPException(status_code=400, detail="invalid Content-Length")
+        if declared > _PROXY_KEY_PAYLOAD_MAX_BYTES:
+            raise HTTPException(
+                status_code=413, detail="proxy API key settings are too large"
+            )
+
+    payload = bytearray()
+    async for chunk in request.stream():
+        payload.extend(chunk)
+        if len(payload) > _PROXY_KEY_PAYLOAD_MAX_BYTES:
+            raise HTTPException(
+                status_code=413, detail="proxy API key settings are too large"
+            )
+    try:
+        return model.model_validate_json(bytes(payload))
+    except ValidationError:
+        _raise_proxy_key_error("invalid_proxy_access_key")
+    raise AssertionError("unreachable")
+
+
+def _raise_proxy_key_exception(exc: Exception) -> None:
+    if isinstance(exc, ProxyAccessKeyNotFound):
+        _raise_proxy_key_error(exc.code)
+    if isinstance(exc, PrimaryProxyAccessKeyRequired):
+        _raise_proxy_key_error(exc.code)
+    _raise_proxy_key_error("invalid_proxy_access_key")
+
+
+def _raise_proxy_key_error(code: str) -> None:
+    status_code = {
+        ProxyAccessKeyNotFound.code: 404,
+        PrimaryProxyAccessKeyRequired.code: 409,
+        "empty_proxy_access_key_update": 400,
+        "invalid_proxy_access_key": 400,
+    }.get(code, 400)
+    raise HTTPException(status_code=status_code, detail=code)
 
 
 async def _read_bootstrap_exchange(request: Request) -> BootstrapExchangeInput:

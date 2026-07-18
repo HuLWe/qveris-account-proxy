@@ -7,6 +7,9 @@ __pycache__
 .ruff_cache
 tests
 runtime
+config
+.release-backup-*
+.update-*
 *.pyc
 *.egg-info
 .coverage
@@ -33,6 +36,8 @@ secrets
 **/secrets
 account-secrets
 **/account-secrets
+proxy-account-secrets
+**/proxy-account-secrets
 profiles
 **/profiles
 keeper-runtime

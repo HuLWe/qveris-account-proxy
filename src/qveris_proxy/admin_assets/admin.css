@@ -480,6 +480,64 @@ main {
   gap: 6px;
 }
 
+.proxy-key-table {
+  min-width: 1140px;
+}
+
+.proxy-key-table .command-column {
+  width: 280px;
+}
+
+.masked-key {
+  color: var(--text);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.key-kind {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.key-toggle,
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-toggle {
+  min-width: 90px;
+  cursor: pointer;
+}
+
+.key-toggle input,
+.switch-row input {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.key-toggle span {
+  margin: 0;
+  font-weight: 650;
+}
+
+.key-toggle span[data-state="ok"] {
+  color: var(--success);
+}
+
+.key-toggle span[data-state="warning"] {
+  color: var(--warning);
+}
+
+.key-toggle span[data-state="idle"] {
+  color: var(--muted);
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(150px, 1fr));
@@ -721,6 +779,97 @@ td.command-column button {
   font-size: 13px;
 }
 
+.key-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 0;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 18px 52px rgba(32, 37, 35, 0.22);
+}
+
+.key-dialog::backdrop {
+  background: rgba(32, 37, 35, 0.46);
+}
+
+.key-dialog form,
+.secret-dialog {
+  padding: 22px;
+}
+
+.dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.dialog-heading h2 {
+  margin: 0 0 3px;
+  font-size: 20px;
+}
+
+.dialog-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.icon-button {
+  width: 38px;
+  min-width: 38px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.key-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.key-form-wide {
+  grid-column: 1 / -1;
+}
+
+.switch-row {
+  justify-content: flex-start;
+  min-height: 38px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.created-key-value {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.created-key-value code {
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 11px 12px;
+  background: var(--surface-subtle);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .console-form {
   display: grid;
   grid-template-columns: minmax(260px, 1.5fr) minmax(180px, 0.7fr);
@@ -930,6 +1079,24 @@ pre {
   .credential-row button {
     grid-column: 2;
     grid-row: 1;
+  }
+
+  .key-dialog form,
+  .secret-dialog {
+    padding: 16px;
+  }
+
+  .key-form-grid,
+  .created-key-value {
+    grid-template-columns: 1fr;
+  }
+
+  .key-form-wide {
+    grid-column: auto;
+  }
+
+  .created-key-value button {
+    width: 100%;
   }
 
   .row-actions {

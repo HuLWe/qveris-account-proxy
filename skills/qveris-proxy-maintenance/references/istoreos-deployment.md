@@ -52,8 +52,10 @@ wc -c < config/accounts.json > .release-backup-TRANSACTION/accounts.size
 ```
 
 After deployment, use `sha256sum -c` and a numeric size comparison. Report only
-pass/fail. SQLite state can change during normal requests, so verify its mount,
-existence, and database health rather than requiring an identical file hash.
+pass/fail. SQLite state contains managed proxy-key hashes, limits, usage, and
+browser claims, and can change during normal requests. Verify its unchanged
+mount, existence, and `PRAGMA quick_check` result rather than hashing or dumping
+application tables.
 
 ## Tested-Tree Transfer
 

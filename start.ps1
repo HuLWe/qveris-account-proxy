@@ -253,7 +253,8 @@ if not accounts_missing:
 
 token_path = "/run/secrets/proxy_access_token"
 if not os.path.lexists(token_path):
-    atomic_create(token_path, secrets.token_hex(32).encode("ascii"))
+    token = f"sk-{secrets.token_urlsafe(32)}"
+    atomic_create(token_path, token.encode("ascii"))
 require_regular(token_path)
 os.chown(token_path, UID, GID)
 os.chmod(token_path, 0o600)

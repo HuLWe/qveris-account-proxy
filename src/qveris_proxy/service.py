@@ -12,9 +12,14 @@ from typing import Any
 import httpx
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
-from starlette.background import BackgroundTask
 from starlette.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
+from .access_keys import (
+    ProxyAccessKeyLease,
+    ProxyAccessKeyManager,
+    ProxyAccessKeyRejected,
+)
 from .admin import (
     AdminConfigError,
     parse_admin_accounts,
@@ -58,19 +63,23 @@ class _NonClosingTransport(httpx.AsyncBaseTransport):
 
 @dataclass(slots=True)
 class _ResourceCloser:
-    response: httpx.Response
+    response: httpx.Response | None
     lease: KeyLease | None
     transport_lease: AccountClientLease | None
     configuration_lease: ConfigurationLease
     semaphore: asyncio.Semaphore = field(repr=False)
-    closed: bool = False
+    access_key_lease: ProxyAccessKeyLease | None = field(repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     async def __call__(self) -> None:
-        if self.closed:
-            return
-        self.closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         try:
-            await self.response.aclose()
+            if self.response is not None:
+                await self.response.aclose()
         finally:
             try:
                 if self.transport_lease is not None:
@@ -83,7 +92,23 @@ class _ResourceCloser:
                     try:
                         self.semaphore.release()
                     finally:
-                        await self.configuration_lease.release()
+                        try:
+                            if self.access_key_lease is not None:
+                                await self.access_key_lease.release()
+                        finally:
+                            await self.configuration_lease.release()
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    def __init__(self, *args: Any, closer: _ResourceCloser, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._closer = closer
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._closer()
 
 
 class ProxyService:
@@ -96,6 +121,7 @@ class ProxyService:
         self.settings = settings
         self.pool = KeyPool(settings)
         self.state = StateStore(settings.state_path)
+        self.proxy_access_keys = ProxyAccessKeyManager(self.state)
         self._base_url = httpx.URL(QVERIS_BASE_URL)
         self._semaphore = asyncio.Semaphore(settings.max_connections)
         self._quota_refresh_lock = asyncio.Lock()
@@ -137,6 +163,10 @@ class ProxyService:
 
             transport_factory = injected_transport
         try:
+            await self.proxy_access_keys.initialize(
+                self.settings.proxy_access_token.get_secret_value(),
+                max_concurrency=self.settings.max_connections,
+            )
             self._transports = await AccountTransportManager.create(
                 self._transport_specs(self.settings.accounts),
                 base_url=self._base_url,
@@ -356,9 +386,9 @@ class ProxyService:
             candidate = self._candidate_settings(accounts)
         except ConfigurationError:
             raise AdminConfigError("invalid_config") from None
-        removed_account_ids = {
-            account.id for account in self.settings.accounts
-        } - {account.id for account in candidate.accounts}
+        removed_account_ids = {account.id for account in self.settings.accounts} - {
+            account.id for account in candidate.accounts
+        }
         current_payload = serialize_accounts(self.settings.accounts)
         candidate_payload = serialize_accounts(candidate.accounts)
         path = self.settings.accounts_file_path
@@ -419,6 +449,41 @@ class ProxyService:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    async def authenticate_proxy(self, request: Request) -> ProxyAccessKeyLease:
+        raw = request.headers.get("authorization", "")
+        scheme, separator, candidate = raw.partition(" ")
+        if separator != " " or scheme.lower() != "bearer" or not candidate:
+            self._raise_proxy_authentication_required()
+        try:
+            return await self.proxy_access_keys.acquire(candidate)
+        except ProxyAccessKeyRejected as exc:
+            if exc.reason in {"invalid", "disabled", "expired"}:
+                self._raise_proxy_authentication_required()
+            detail = {
+                "request_limit": "proxy API key usage limit reached",
+                "rate_limit": "proxy API key rate limit reached",
+                "concurrency": "proxy API key concurrency limit reached",
+            }[exc.reason]
+            headers = (
+                {"Retry-After": str(exc.retry_after)}
+                if exc.retry_after is not None
+                else None
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=detail,
+                headers=headers,
+            ) from None
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _raise_proxy_authentication_required() -> None:
+        raise HTTPException(
+            status_code=401,
+            detail="proxy authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     def resolve_explicit_account(self, request: Request) -> str | None:
         account_id = request.headers.get("x-qveris-account")
         if account_id is not None and not self.pool.has_account(account_id):
@@ -428,9 +493,15 @@ class ProxyService:
     async def forward(
         self, request: Request, operation: Operation
     ) -> StreamingResponse:
+        access_key_lease: ProxyAccessKeyLease | None = None
         if operation.proxy_auth:
-            self.authenticate(request)
-        body = await self._read_request_body(request)
+            access_key_lease = await self.authenticate_proxy(request)
+        try:
+            body = await self._read_request_body(request)
+        except BaseException:
+            if access_key_lease is not None:
+                await access_key_lease.release()
+            raise
         affinity_values = self._request_affinity_values(request, body)
 
         try:
@@ -439,12 +510,16 @@ class ProxyService:
                 timeout=self.settings.queue_timeout_seconds,
             )
         except TimeoutError:
+            if access_key_lease is not None:
+                await access_key_lease.release()
             raise HTTPException(status_code=503, detail="proxy is busy") from None
 
         try:
             configuration_lease = await self._gate.acquire()
         except BaseException:
             self._semaphore.release()
+            if access_key_lease is not None:
+                await access_key_lease.release()
             raise
 
         request_pool = self.pool
@@ -581,6 +656,7 @@ class ProxyService:
                 transport_lease,
                 configuration_lease,
                 self._semaphore,
+                access_key_lease,
             )
             if account_id is not None:
                 response_headers["x-qveris-proxy-account"] = account_id
@@ -632,11 +708,11 @@ class ProxyService:
                     finally:
                         await closer()
 
-            return StreamingResponse(
+            return _ClosingStreamingResponse(
                 raw_body(),
                 status_code=response.status_code,
                 headers=response_headers,
-                background=BackgroundTask(closer),
+                closer=closer,
             )
         except HTTPException:
             await self._cleanup_failed_request(
@@ -644,6 +720,7 @@ class ProxyService:
                 lease,
                 transport_lease,
                 configuration_lease,
+                access_key_lease,
             )
             raise
         except httpx.TimeoutException:
@@ -653,6 +730,7 @@ class ProxyService:
                 lease,
                 transport_lease,
                 configuration_lease,
+                access_key_lease,
             )
             raise HTTPException(
                 status_code=504, detail="QVeris upstream timed out"
@@ -664,6 +742,7 @@ class ProxyService:
                 lease,
                 transport_lease,
                 configuration_lease,
+                access_key_lease,
             )
             raise HTTPException(
                 status_code=502, detail="QVeris upstream is unavailable"
@@ -674,6 +753,7 @@ class ProxyService:
                 lease,
                 transport_lease,
                 configuration_lease,
+                access_key_lease,
             )
             raise
 
@@ -683,23 +763,16 @@ class ProxyService:
         lease: KeyLease | None,
         transport_lease: AccountClientLease | None,
         configuration_lease: ConfigurationLease,
+        access_key_lease: ProxyAccessKeyLease | None,
     ) -> None:
-        try:
-            if response is not None:
-                await response.aclose()
-        finally:
-            try:
-                if transport_lease is not None:
-                    await transport_lease.release()
-            finally:
-                try:
-                    if lease is not None:
-                        await lease.release()
-                finally:
-                    try:
-                        self._semaphore.release()
-                    finally:
-                        await configuration_lease.release()
+        await _ResourceCloser(
+            response,
+            lease,
+            transport_lease,
+            configuration_lease,
+            self._semaphore,
+            access_key_lease,
+        )()
 
     async def _set_affinities_for_pool(
         self,
@@ -1113,9 +1186,7 @@ class ProxyService:
                     }
                 )
             except (httpx.TimeoutException, httpx.TransportError):
-                await self._save_transport_failure(
-                    lease, expected_pool=request_pool
-                )
+                await self._save_transport_failure(lease, expected_pool=request_pool)
                 await self._save_quota_snapshot_for_pool(
                     account_id, 0, {}, expected_pool=request_pool
                 )

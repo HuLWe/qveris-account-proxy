@@ -148,6 +148,17 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b'id="copy-base-url"' in shell.content
     assert b'id="copy-connection"' in shell.content
     assert b'id="pool-summary"' in shell.content
+    assert b'data-tab="proxy-keys"' in shell.content
+    assert b'id="proxy-keys"' in shell.content
+    assert b'id="create-proxy-key"' in shell.content
+    assert b'id="proxy-key-editor"' in shell.content
+    assert b'id="proxy-key-secret-dialog"' in shell.content
+    assert b'id="created-proxy-key"' in shell.content
+    assert b'"/admin/v1/proxy-keys"' in script.content
+    assert b"showCreatedProxySecret" in script.content
+    assert b"clearCreatedProxySecret" in script.content
+    assert b"proxyKeyErrorMessage" in script.content
+    assert b".key-dialog" in stylesheet.content
     assert 'aria-label="接入应用"'.encode() in shell.content
     assert 'aria-label="复制全部接入配置"'.encode() in shell.content
     assert 'aria-label="复制 API Base URL"'.encode() in shell.content

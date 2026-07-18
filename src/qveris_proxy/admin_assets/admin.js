@@ -13,6 +13,10 @@ const state = {
   tests: new Map(),
   apiKeyVisible: false,
   deletingAccountId: null,
+  proxyKeys: [],
+  proxyKeyEditingId: null,
+  proxyKeyBusyIds: new Set(),
+  createdProxySecret: "",
 };
 
 const byId = (id) => document.getElementById(id);
@@ -326,15 +330,17 @@ async function connect(token) {
   state.token = token;
   storeSessionToken(token);
   try {
-    const [status, config, catalog] = await Promise.all([
+    const [status, config, catalog, proxyKeys] = await Promise.all([
       requestJson("/admin/v1/accounts"),
       requestJson("/admin/v1/config"),
       requestJson("/admin/v1/operations"),
+      requestJson("/admin/v1/proxy-keys"),
     ]);
     state.status = status;
     state.config = config;
     state.draft = structuredClone(config);
     state.operations = catalog.operations;
+    state.proxyKeys = Array.isArray(proxyKeys.keys) ? proxyKeys.keys : [];
     try {
       await rememberBrowserSession();
     } catch {
@@ -367,6 +373,11 @@ function resetWorkspace() {
   state.operations = [];
   state.tests.clear();
   state.deletingAccountId = null;
+  state.proxyKeys = [];
+  state.proxyKeyEditingId = null;
+  state.proxyKeyBusyIds.clear();
+  closeProxyKeyEditor();
+  closeCreatedProxySecret();
   byId("workspace").hidden = true;
   byId("locked-state").hidden = false;
   byId("topbar-actions").hidden = true;
@@ -425,6 +436,7 @@ function setGateway(status, label) {
 
 function renderAll() {
   renderStatus();
+  renderProxyKeys();
   renderConfig();
   renderConsole();
 }
@@ -661,6 +673,385 @@ function renderStatus() {
     body.append(row);
   }
   byId("status-updated").textContent = `刷新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+}
+
+function proxyKeyMask(key) {
+  if (typeof key.masked_key === "string" && key.masked_key) {
+    return key.masked_key;
+  }
+  const prefix = typeof key.prefix === "string" && key.prefix ? key.prefix : "sk-";
+  const suffix = typeof key.suffix === "string" && key.suffix ? key.suffix : "••••";
+  return `${prefix}${"•".repeat(8)}${suffix}`;
+}
+
+function proxyKeyStatus(key) {
+  const now = Date.now() / 1000;
+  if (!key.enabled) {
+    return { label: "已停用", state: "idle" };
+  }
+  if (key.expires_at && key.expires_at <= now) {
+    return { label: "已到期", state: "warning" };
+  }
+  if (
+    key.request_limit !== null &&
+    key.request_limit !== undefined &&
+    Number(key.requests_used || 0) >= Number(key.request_limit)
+  ) {
+    return { label: "已耗尽", state: "warning" };
+  }
+  return { label: "已启用", state: "ok" };
+}
+
+function renderProxyKeys() {
+  const keys = state.proxyKeys || [];
+  const enabledCount = keys.filter((key) => key.enabled).length;
+  const requestsUsed = keys.reduce(
+    (sum, key) => sum + Number(key.requests_used || 0),
+    0,
+  );
+  const activeRequests = keys.reduce(
+    (sum, key) => sum + Number(key.active_requests || 0),
+    0,
+  );
+  byId("proxy-key-summary").textContent = `${keys.length} 个 Key · ${enabledCount} 个已启用`;
+
+  const metrics = byId("proxy-key-metrics");
+  clear(metrics);
+  appendMetric(metrics, "Key 总数", keys.length);
+  appendMetric(metrics, "已启用", enabledCount);
+  appendMetric(metrics, "累计请求", formatNumber(requestsUsed));
+  appendMetric(metrics, "当前并发", formatNumber(activeRequests));
+
+  const body = byId("proxy-keys");
+  clear(body);
+  if (!keys.length) {
+    const empty = node("td", { className: "empty-row", text: "暂无代理 Key" });
+    empty.colSpan = 8;
+    const row = node("tr");
+    row.append(empty);
+    body.append(row);
+    return;
+  }
+
+  for (const key of keys) {
+    const row = node("tr");
+    const identity = node("td");
+    identity.append(node("strong", { text: key.name || "未命名" }));
+    if (key.kind === "primary") {
+      identity.append(node("span", { className: "key-kind", text: "主 Key" }));
+    }
+
+    const masked = node("td");
+    masked.append(node("code", { className: "masked-key", text: proxyKeyMask(key) }));
+
+    const status = proxyKeyStatus(key);
+    const enabled = node("td");
+    const toggle = node("label", { className: "key-toggle" });
+    const checkbox = node("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(key.enabled);
+    checkbox.disabled = state.proxyKeyBusyIds.has(key.id);
+    checkbox.setAttribute(
+      "aria-label",
+      `${checkbox.checked ? "停用" : "启用"}代理 Key ${key.name || key.id}`,
+    );
+    checkbox.addEventListener("change", () => {
+      setProxyKeyEnabled(key, checkbox.checked);
+    });
+    const statusText = node("span", { text: status.label });
+    statusText.dataset.state = status.state;
+    toggle.append(checkbox, statusText);
+    enabled.append(toggle);
+
+    const usage = node("td");
+    const requestLimit = key.request_limit === null || key.request_limit === undefined
+      ? "不限"
+      : formatNumber(key.request_limit);
+    usage.append(
+      node("strong", { text: `${formatNumber(key.requests_used || 0)} / ${requestLimit}` }),
+    );
+
+    const rpm = node("td");
+    rpm.append(node("strong", {
+      text: key.requests_per_minute === null || key.requests_per_minute === undefined
+        ? "不限"
+        : formatNumber(key.requests_per_minute),
+    }));
+
+    const concurrency = node("td");
+    concurrency.append(node("strong", {
+      text: `${formatNumber(key.active_requests || 0)} / ${formatNumber(key.max_concurrency)}`,
+    }));
+
+    const expiry = node("td");
+    expiry.append(node("span", {
+      text: key.expires_at ? formatTime(key.expires_at) : "永不过期",
+    }));
+
+    const action = node("td", { className: "command-column" });
+    const actionGroup = node("div", { className: "row-actions" });
+    const edit = node("button", { className: "secondary", text: "编辑", type: "button" });
+    const reset = node("button", { className: "secondary", text: "重置用量", type: "button" });
+    const remove = node("button", { className: "danger", text: "删除", type: "button" });
+    const busy = state.proxyKeyBusyIds.has(key.id);
+    edit.disabled = busy;
+    reset.disabled = busy;
+    remove.disabled = busy || key.kind === "primary";
+    remove.title = key.kind === "primary" ? "主 Key 保留用于兼容现有接入" : "删除代理 Key";
+    edit.setAttribute("aria-label", `编辑代理 Key ${key.name || key.id}`);
+    reset.setAttribute("aria-label", `重置代理 Key ${key.name || key.id} 的用量`);
+    remove.setAttribute("aria-label", `删除代理 Key ${key.name || key.id}`);
+    edit.addEventListener("click", () => openProxyKeyEditor(key));
+    reset.addEventListener("click", () => resetProxyKeyUsage(key));
+    remove.addEventListener("click", () => deleteProxyKey(key));
+    actionGroup.append(edit, reset, remove);
+    action.append(actionGroup);
+
+    row.append(identity, masked, enabled, usage, rpm, concurrency, expiry, action);
+    body.append(row);
+  }
+}
+
+function unixTimeToLocalInput(epochSeconds) {
+  if (!epochSeconds) {
+    return "";
+  }
+  const date = new Date(Number(epochSeconds) * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16);
+}
+
+function localInputToUnixTime(value) {
+  if (!value) {
+    return null;
+  }
+  const milliseconds = new Date(value).getTime();
+  return Number.isNaN(milliseconds) ? null : Math.floor(milliseconds / 1000);
+}
+
+function nullablePositiveNumber(inputId) {
+  const value = byId(inputId).value.trim();
+  return value ? Number(value) : null;
+}
+
+function openProxyKeyEditor(key = null) {
+  state.proxyKeyEditingId = key ? key.id : null;
+  byId("proxy-key-editor-title").textContent = key ? "编辑代理 Key" : "创建代理 Key";
+  byId("proxy-key-editor-kind").textContent = key && key.kind === "primary"
+    ? "主 Key"
+    : key
+      ? "托管 Key"
+      : "新 Key";
+  byId("save-proxy-key").textContent = key ? "保存" : "创建";
+  byId("proxy-key-name").value = key ? key.name || "" : "";
+  byId("proxy-key-concurrency").value = key ? key.max_concurrency : 8;
+  byId("proxy-key-request-limit").value = key && key.request_limit !== null
+    && key.request_limit !== undefined ? key.request_limit : "";
+  byId("proxy-key-rpm").value = key && key.requests_per_minute !== null
+    && key.requests_per_minute !== undefined ? key.requests_per_minute : "";
+  byId("proxy-key-expires").value = key
+    ? unixTimeToLocalInput(key.expires_at)
+    : "";
+  byId("proxy-key-enabled").checked = key ? Boolean(key.enabled) : true;
+  const dialog = byId("proxy-key-editor");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+  byId("proxy-key-name").focus();
+}
+
+function closeProxyKeyEditor() {
+  state.proxyKeyEditingId = null;
+  const dialog = byId("proxy-key-editor");
+  if (dialog.open) {
+    dialog.close();
+  }
+}
+
+function proxyKeyPayload() {
+  return {
+    name: byId("proxy-key-name").value.trim(),
+    enabled: byId("proxy-key-enabled").checked,
+    request_limit: nullablePositiveNumber("proxy-key-request-limit"),
+    requests_per_minute: nullablePositiveNumber("proxy-key-rpm"),
+    max_concurrency: Number(byId("proxy-key-concurrency").value),
+    expires_at: localInputToUnixTime(byId("proxy-key-expires").value),
+  };
+}
+
+function proxyKeyErrorMessage(code) {
+  return {
+    proxy_access_key_not_found: "代理 Key 已不存在，请刷新列表",
+    primary_proxy_access_key_required: "主 Key 需要保留",
+    empty_proxy_access_key_update: "没有需要保存的修改",
+    invalid_proxy_access_key: "代理 Key 配置无效，请检查限制值",
+  }[code] || code;
+}
+
+function upsertProxyKey(key) {
+  const index = state.proxyKeys.findIndex((candidate) => candidate.id === key.id);
+  if (index < 0) {
+    state.proxyKeys.push(key);
+  } else {
+    state.proxyKeys[index] = key;
+  }
+}
+
+async function saveProxyKey() {
+  const form = byId("proxy-key-form");
+  if (!form.reportValidity()) {
+    return;
+  }
+  const button = byId("save-proxy-key");
+  setBusy(button, true);
+  const editingId = state.proxyKeyEditingId;
+  try {
+    const result = await requestJson(
+      editingId
+        ? `/admin/v1/proxy-keys/${encodeURIComponent(editingId)}`
+        : "/admin/v1/proxy-keys",
+      {
+        method: editingId ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(proxyKeyPayload()),
+      },
+    );
+    upsertProxyKey(result.key);
+    closeProxyKeyEditor();
+    renderProxyKeys();
+    if (!editingId && typeof result.secret === "string" && result.secret) {
+      showCreatedProxySecret(result.secret);
+    } else {
+      showToast(editingId ? "代理 Key 已保存" : "代理 Key 已创建");
+    }
+  } catch (error) {
+    showToast(proxyKeyErrorMessage(error.message), true);
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function refreshProxyKeys() {
+  const button = byId("refresh-proxy-keys");
+  setBusy(button, true);
+  try {
+    const result = await requestJson("/admin/v1/proxy-keys");
+    state.proxyKeys = Array.isArray(result.keys) ? result.keys : [];
+    renderProxyKeys();
+    showToast("代理 Key 已刷新");
+  } catch (error) {
+    showToast(proxyKeyErrorMessage(error.message), true);
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function updateProxyKey(key, payload, successMessage) {
+  state.proxyKeyBusyIds.add(key.id);
+  renderProxyKeys();
+  try {
+    const result = await requestJson(
+      `/admin/v1/proxy-keys/${encodeURIComponent(key.id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    upsertProxyKey(result.key);
+    showToast(successMessage);
+  } catch (error) {
+    showToast(proxyKeyErrorMessage(error.message), true);
+  } finally {
+    state.proxyKeyBusyIds.delete(key.id);
+    renderProxyKeys();
+  }
+}
+
+async function setProxyKeyEnabled(key, enabled) {
+  await updateProxyKey(key, { enabled }, enabled ? "代理 Key 已启用" : "代理 Key 已停用");
+}
+
+async function resetProxyKeyUsage(key) {
+  if (!window.confirm(`确认重置“${key.name || key.id}”的累计用量？`)) {
+    return;
+  }
+  state.proxyKeyBusyIds.add(key.id);
+  renderProxyKeys();
+  try {
+    const result = await requestJson(
+      `/admin/v1/proxy-keys/${encodeURIComponent(key.id)}/reset-usage`,
+      { method: "POST" },
+    );
+    upsertProxyKey(result.key);
+    showToast("用量已重置");
+  } catch (error) {
+    showToast(proxyKeyErrorMessage(error.message), true);
+  } finally {
+    state.proxyKeyBusyIds.delete(key.id);
+    renderProxyKeys();
+  }
+}
+
+async function deleteProxyKey(key) {
+  if (key.kind === "primary") {
+    showToast("主 Key 需要保留", true);
+    return;
+  }
+  if (!window.confirm(`确认删除代理 Key“${key.name || key.id}”？`)) {
+    return;
+  }
+  state.proxyKeyBusyIds.add(key.id);
+  renderProxyKeys();
+  try {
+    await requestJson(`/admin/v1/proxy-keys/${encodeURIComponent(key.id)}`, {
+      method: "DELETE",
+    });
+    state.proxyKeys = state.proxyKeys.filter((candidate) => candidate.id !== key.id);
+    showToast("代理 Key 已删除");
+  } catch (error) {
+    showToast(proxyKeyErrorMessage(error.message), true);
+  } finally {
+    state.proxyKeyBusyIds.delete(key.id);
+    renderProxyKeys();
+  }
+}
+
+function showCreatedProxySecret(secret) {
+  state.createdProxySecret = secret;
+  byId("created-proxy-key").textContent = secret;
+  const dialog = byId("proxy-key-secret-dialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+}
+
+function clearCreatedProxySecret() {
+  state.createdProxySecret = "";
+  const display = byId("created-proxy-key");
+  if (display) {
+    display.textContent = "";
+  }
+}
+
+function closeCreatedProxySecret() {
+  const dialog = byId("proxy-key-secret-dialog");
+  if (dialog.open) {
+    dialog.close();
+  }
+  clearCreatedProxySecret();
+}
+
+async function copyCreatedProxySecret() {
+  if (!state.createdProxySecret) {
+    return;
+  }
+  const copied = await copyText(state.createdProxySecret);
+  showToast(copied ? "代理 API Key 已复制" : "复制失败，请检查剪贴板权限", !copied);
 }
 
 function makeLabel(text, input) {
@@ -1392,6 +1783,20 @@ byId("toggle-manual-key").addEventListener("click", () => {
 byId("refresh-status").addEventListener("click", refreshStatus);
 byId("reload-accounts").addEventListener("click", reloadAccounts);
 byId("test-gateway").addEventListener("click", testGateway);
+byId("refresh-proxy-keys").addEventListener("click", refreshProxyKeys);
+byId("create-proxy-key").addEventListener("click", () => openProxyKeyEditor());
+byId("close-proxy-key-editor").addEventListener("click", closeProxyKeyEditor);
+byId("cancel-proxy-key-editor").addEventListener("click", closeProxyKeyEditor);
+byId("proxy-key-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveProxyKey();
+});
+byId("proxy-key-editor").addEventListener("close", () => {
+  state.proxyKeyEditingId = null;
+});
+byId("copy-created-proxy-key").addEventListener("click", copyCreatedProxySecret);
+byId("close-proxy-key-secret").addEventListener("click", closeCreatedProxySecret);
+byId("proxy-key-secret-dialog").addEventListener("close", clearCreatedProxySecret);
 byId("validate-config").addEventListener("click", validateConfig);
 byId("save-config").addEventListener("click", saveConfig);
 byId("add-account").addEventListener("click", () => {

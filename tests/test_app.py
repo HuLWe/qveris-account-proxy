@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+from starlette.requests import ClientDisconnect
 
 from qveris_proxy.app import create_app
 from qveris_proxy.config import (
@@ -833,6 +834,223 @@ class _BlockingResponseStream(httpx.AsyncByteStream):
         yield b'{"status":"'
         await self._release.wait()
         yield b'ok"}'
+
+
+class _BlockingCountedResponseStream(httpx.AsyncByteStream):
+    def __init__(self, started: asyncio.Event, release: asyncio.Event) -> None:
+        self._started = started
+        self._release = release
+        self.close_calls = 0
+
+    async def __aiter__(self):
+        yield b'{"status":"'
+        self._started.set()
+        await self._release.wait()
+        yield b'ok"}'
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
+class _CloseCountingSingleChunk(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def __aiter__(self):
+        yield b'{"partial":true}'
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
+async def _call_with_broken_downstream_send(app, secret: str) -> None:
+    body = json.dumps({"query": "send-failure"}).encode()
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            raise OSError("downstream send fixture")
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/v1/search",
+        "raw_path": b"/api/v1/search",
+        "query_string": b"",
+        "root_path": "",
+        "server": ("proxy.test", 80),
+        "client": ("127.0.0.1", 1234),
+        "headers": [
+            (b"host", b"proxy.test"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (b"authorization", f"Bearer {secret}".encode()),
+            (b"x-qveris-account", b"account-a"),
+        ],
+    }
+    await app(scope, receive, send)
+
+
+@pytest.mark.asyncio
+async def test_proxy_key_concurrency_is_held_until_stream_finishes() -> None:
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    stream = _BlockingCountedResponseStream(stream_started, release_stream)
+    calls = 0
+
+    async def upstream(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                stream=stream,
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(make_settings(), transport=httpx.MockTransport(upstream))
+    async with LifespanManager(app):
+        manager = app.state.proxy_service.proxy_access_keys
+        created = await manager.create("stream client", max_concurrency=1)
+        headers = {
+            "Authorization": f"Bearer {created.secret}",
+            "X-QVeris-Account": "account-a",
+        }
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://proxy.test",
+            ) as slow_client,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://proxy.test",
+            ) as control_client,
+        ):
+            slow = asyncio.create_task(
+                slow_client.post(
+                    "/api/v1/search",
+                    headers=headers,
+                    json={"query": "slow"},
+                )
+            )
+            try:
+                await asyncio.wait_for(stream_started.wait(), timeout=1)
+                assert (await manager.get(created.key.id)).active_requests == 1
+
+                blocked = await asyncio.wait_for(
+                    control_client.post(
+                        "/api/v1/search",
+                        headers=headers,
+                        json={"query": "blocked"},
+                    ),
+                    timeout=1,
+                )
+                assert blocked.status_code == 429
+                assert blocked.json() == {
+                    "detail": "proxy API key concurrency limit reached"
+                }
+                assert blocked.headers["retry-after"] == "1"
+                assert calls == 1
+                assert (await manager.get(created.key.id)).requests_used == 1
+            finally:
+                release_stream.set()
+
+            completed = await asyncio.wait_for(slow, timeout=1)
+            assert completed.status_code == 200
+            assert completed.json() == {"status": "ok"}
+            assert stream.close_calls == 1
+            assert (await manager.get(created.key.id)).active_requests == 0
+
+            resumed = await control_client.post(
+                "/api/v1/search",
+                headers=headers,
+                json={"query": "resumed"},
+            )
+            assert resumed.status_code == 200
+            assert calls == 2
+            current = await manager.get(created.key.id)
+            assert current.requests_used == 2
+            assert current.active_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_upstream_connect_error_releases_proxy_key_concurrency() -> None:
+    calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("fixture unavailable", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(
+        make_settings(multiple_accounts=True),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        manager = app.state.proxy_service.proxy_access_keys
+        created = await manager.create("error client", max_concurrency=1)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://proxy.test",
+        ) as client:
+            failed = await client.post(
+                "/api/v1/search",
+                headers={
+                    "Authorization": f"Bearer {created.secret}",
+                    "X-QVeris-Account": "account-a",
+                },
+                json={"query": "fails"},
+            )
+            assert failed.status_code == 502
+            assert (await manager.get(created.key.id)).active_requests == 0
+
+            recovered = await client.post(
+                "/api/v1/search",
+                headers={
+                    "Authorization": f"Bearer {created.secret}",
+                    "X-QVeris-Account": "account-b",
+                },
+                json={"query": "works"},
+            )
+            assert recovered.status_code == 200
+            assert calls == 2
+            current = await manager.get(created.key.id)
+            assert current.requests_used == 2
+            assert current.active_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_downstream_send_failure_closes_stream_and_releases_proxy_key() -> None:
+    stream = _CloseCountingSingleChunk()
+
+    async def upstream(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    app = create_app(make_settings(), transport=httpx.MockTransport(upstream))
+    async with LifespanManager(app):
+        manager = app.state.proxy_service.proxy_access_keys
+        created = await manager.create("send failure", max_concurrency=1)
+
+        with pytest.raises(ClientDisconnect):
+            await _call_with_broken_downstream_send(app, created.secret)
+
+        assert (await manager.get(created.key.id)).active_requests == 0
+        assert stream.close_calls == 1
+        replacement = await manager.acquire(created.secret)
+        await replacement.release()
 
 
 @pytest.mark.asyncio

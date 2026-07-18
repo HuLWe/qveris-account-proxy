@@ -216,7 +216,8 @@ def test_launchers_include_the_same_first_run_contract() -> None:
         assert "qveris_config" in launcher
         assert "qveris_secrets" in launcher
         assert "io.github.hulwe.qveris.quickstart" in launcher
-        assert "secrets.token_hex(32)" in launcher
+        assert 'token = f"sk-{secrets.token_urlsafe(32)}"' in launcher
+        assert "secrets.token_hex(32)" not in launcher
         assert "bootstrap_ticket" in launcher
         assert "admin/v1/bootstrap-ticket" in launcher
         assert 'profile_id = secrets.token_hex(16)' in launcher
@@ -450,6 +451,7 @@ def test_shell_quickstart_stop_skips_build_and_preserves_volumes(
 def test_documentation_and_ignore_rules_match_the_delivery_flow() -> None:
     readme = read_project_file("README.md")
     gitignore = read_project_file(".gitignore")
+    dockerignore = read_project_file(".dockerignore")
 
     assert "## 3 步快速开始" in readme
     assert REGISTRATION_URL in readme
@@ -471,3 +473,10 @@ def test_documentation_and_ignore_rules_match_the_delivery_flow() -> None:
     assert "accounts.json" in ignored
     assert "proxy_access_token" in ignored
     assert "**/secrets/" in ignored
+
+    docker_ignored = set(dockerignore.splitlines())
+    assert "config" in docker_ignored
+    assert "proxy-account-secrets" in docker_ignored
+    assert "**/proxy-account-secrets" in docker_ignored
+    assert ".release-backup-*" in docker_ignored
+    assert ".update-*" in docker_ignored
