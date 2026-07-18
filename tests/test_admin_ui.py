@@ -182,6 +182,10 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert "账号名称".encode() in script.content
     assert "内部 ID".encode() in script.content
     assert b"nextAccountIdentity" in script.content
+    assert b"draftBaseline" in script.content
+    assert b"revision: state.config?.revision ?? null" in script.content
+    assert b"config_revision_conflict" in script.content
+    assert "服务端账号配置已更新".encode() in script.content
     assert b"actionGroup.append(testButton, editButton, deleteButton)" in script.content
     assert b"deleteButton.disabled = deleteInProgress" in script.content
     assert b"remove.disabled = deleteInProgress" in script.content
@@ -580,6 +584,7 @@ async def test_persistent_editing_preserves_existing_values_and_hot_reloads(
     assert saved.json()["reload"]["applied"] is True
     assert saved.json()["config"]["accounts"][0]["weight"] == 4
     assert saved.json()["config"]["accounts"][0]["name"] == "主账号"
+    assert saved.json()["config"]["revision"] == config.json()["revision"]
     assert KEY_A1 not in saved.text
     assert KEY_A2 not in saved.text
     assert OAUTH_A1 not in saved.text
@@ -602,6 +607,83 @@ async def test_persistent_editing_preserves_existing_values_and_hot_reloads(
         "new-key",
     ]
     assert list(tmp_path.glob(".accounts-*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_admin_payload_preserves_existing_account_name(
+    tmp_path: Path,
+) -> None:
+    accounts_path = tmp_path / "accounts.json"
+    settings = make_settings(
+        accounts_file_path=str(accounts_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    named_account = settings.accounts[0].model_copy(update={"name": "已有名称"})
+    settings = settings.model_copy(update={"accounts": (named_account,)})
+    accounts_path.write_bytes(serialize_accounts(settings.accounts))
+    payload = editable_payload(weight=3)
+    del payload["accounts"][0]["name"]
+    app = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+
+    async with LifespanManager(app):
+        async with await app_client(app) as client:
+            saved = await client.put(
+                "/admin/v1/config", headers=auth_headers(), json=payload
+            )
+
+    assert saved.status_code == 200
+    assert saved.json()["config"]["accounts"][0]["name"] == "已有名称"
+    stored = json.loads(accounts_path.read_text(encoding="utf-8"))
+    assert stored["accounts"][0]["name"] == "已有名称"
+    assert stored["accounts"][0]["weight"] == 3
+
+
+@pytest.mark.asyncio
+async def test_stale_admin_revision_cannot_overwrite_pending_or_restarted_accounts(
+    tmp_path: Path,
+) -> None:
+    accounts_path = tmp_path / "accounts.json"
+    settings = make_settings(
+        accounts_file_path=str(accounts_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    accounts_path.write_bytes(serialize_accounts(settings.accounts))
+    external = make_settings(multiple_accounts=True)
+    app = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+
+    async with LifespanManager(app):
+        async with await app_client(app) as client:
+            initial = await client.get("/admin/v1/config", headers=auth_headers())
+            stale_payload = editable_payload(name="旧草稿")
+            stale_payload["revision"] = initial.json()["revision"]
+
+            accounts_path.write_bytes(serialize_accounts(external.accounts))
+            conflict = await client.put(
+                "/admin/v1/config",
+                headers=auth_headers(),
+                json=stale_payload,
+            )
+            current = await client.get("/admin/v1/config", headers=auth_headers())
+
+    assert conflict.status_code == 409
+    assert conflict.json() == {"detail": "config_revision_conflict"}
+    assert [account["id"] for account in current.json()["accounts"]] == [
+        "account-a",
+        "account-b",
+    ]
+    stored = json.loads(accounts_path.read_text(encoding="utf-8"))
+    assert [account["id"] for account in stored["accounts"]] == [
+        "account-a",
+        "account-b",
+    ]
+
+    restarted = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+    async with LifespanManager(restarted):
+        async with await app_client(restarted) as client:
+            after_restart = await client.get("/admin/v1/config", headers=auth_headers())
+    assert after_restart.json()["revision"] == current.json()["revision"]
 
 
 @pytest.mark.asyncio

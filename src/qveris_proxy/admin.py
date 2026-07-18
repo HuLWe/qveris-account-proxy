@@ -55,6 +55,7 @@ class AccountInput(BaseModel):
 class AccountsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     accounts: tuple[AccountInput, ...] = Field(min_length=1)
 
 
@@ -105,6 +106,16 @@ def parse_admin_accounts(
     payload: bytes,
     current_accounts: tuple[AccountConfig, ...],
 ) -> tuple[AccountConfig, ...]:
+    accounts, _ = parse_admin_accounts_submission(payload, current_accounts)
+    return accounts
+
+
+def parse_admin_accounts_submission(
+    payload: bytes,
+    current_accounts: tuple[AccountConfig, ...],
+    *,
+    current_revision: str | None = None,
+) -> tuple[tuple[AccountConfig, ...], str | None]:
     if len(payload) > ADMIN_CONFIG_MAX_BYTES:
         raise AdminConfigError("config_too_large")
     try:
@@ -112,6 +123,12 @@ def parse_admin_accounts(
         submitted = AccountsInput.model_validate(document)
     except (UnicodeDecodeError, json.JSONDecodeError, ValidationError):
         raise AdminConfigError("invalid_config") from None
+    if (
+        current_revision is not None
+        and submitted.revision is not None
+        and submitted.revision != current_revision
+    ):
+        raise AdminConfigError("config_revision_conflict")
 
     current_by_id = {account.id: account for account in current_accounts}
     accounts: list[AccountConfig] = []
@@ -175,7 +192,7 @@ def parse_admin_accounts(
             )
     except (ValidationError, ConfigurationError):
         raise AdminConfigError("invalid_config") from None
-    return tuple(accounts)
+    return tuple(accounts), submitted.revision
 
 
 def _credential_value(

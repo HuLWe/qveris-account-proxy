@@ -376,9 +376,7 @@ def create_app(
         service = request.app.state.proxy_service
         service.authenticate(request)
         response.headers["Cache-Control"] = "no-store"
-        config = service.admin_config()
-        config["revision"] = (await service.credential_reload_status()).generation
-        return config
+        return await service.admin_config_snapshot()
 
     @application.post("/admin/v1/config/validate", include_in_schema=False)
     async def validate_admin_config(
@@ -406,7 +404,7 @@ def create_app(
         except AdminConfigError as exc:
             _raise_admin_config_error(str(exc))
         return {
-            "config": service.admin_config(),
+            "config": await service.admin_config_snapshot(),
             "reload": asdict(result),
         }
 
@@ -632,6 +630,8 @@ def _raise_admin_config_error(code: str) -> None:
         "accounts_file_unavailable": 409,
         "last_account_required": 409,
         "default_account_locked": 409,
+        "config_revision_conflict": 409,
+        "config_reload_failed": 409,
         "config_too_large": 413,
         "invalid_config": 400,
         "missing_api_key_value": 400,

@@ -9,6 +9,7 @@ const state = {
   status: null,
   config: null,
   draft: null,
+  draftBaseline: "",
   operations: [],
   tests: new Map(),
   apiKeyVisible: false,
@@ -347,6 +348,7 @@ async function connect(token) {
       // The current tab remains connected when persistent browser storage is blocked.
     }
     markPersistedAccounts();
+    rememberDraftBaseline();
     byId("api-version").textContent = `API ${catalog.api_version}`;
     byId("locked-state").hidden = true;
     byId("workspace").hidden = false;
@@ -370,6 +372,7 @@ function resetWorkspace() {
   state.status = null;
   state.config = null;
   state.draft = null;
+  state.draftBaseline = "";
   state.operations = [];
   state.tests.clear();
   state.deletingAccountId = null;
@@ -471,22 +474,38 @@ async function editAccount(accountId) {
     showToast("账号配置尚未加载，请刷新后重试", true);
     return;
   }
-  let accountIndex = state.draft.accounts.findIndex(
+
+  try {
+    const config = await requestJson("/admin/v1/config");
+    const accountMissing = !state.draft.accounts.some(
+      (account) => account.id === accountId,
+    );
+    const revisionChanged = config.revision !== state.config?.revision;
+    if (revisionChanged || accountMissing) {
+      if (
+        configDraftIsDirty() &&
+        !window.confirm(
+          "服务端账号配置已更新。载入最新配置会放弃当前未保存修改，是否继续？",
+        )
+      ) {
+        showToast("已保留未保存修改；载入最新配置后再编辑此账号", true);
+        return;
+      }
+      state.config = config;
+      state.draft = structuredClone(config);
+      markPersistedAccounts();
+      rememberDraftBaseline();
+    } else {
+      state.config = config;
+    }
+  } catch (error) {
+    showToast(error.message, true);
+    return;
+  }
+
+  const accountIndex = state.draft.accounts.findIndex(
     (account) => account.id === accountId,
   );
-  if (accountIndex < 0) {
-    try {
-      const config = await requestJson("/admin/v1/config");
-      state.config = config;
-      mergeDraftWithConfig(config);
-      accountIndex = state.draft.accounts.findIndex(
-        (account) => account.id === accountId,
-      );
-    } catch (error) {
-      showToast(error.message, true);
-      return;
-    }
-  }
   if (accountIndex < 0) {
     showToast(`账号 ${accountId} 已不存在，请刷新状态`, true);
     return;
@@ -843,6 +862,9 @@ function renderProxyKeys() {
     edit.setAttribute("aria-label", `编辑代理 Key ${key.name || key.id}`);
     reset.setAttribute("aria-label", `重置代理 Key ${key.name || key.id} 的用量`);
     remove.setAttribute("aria-label", `删除代理 Key ${key.name || key.id}`);
+    if (key.kind === "primary") {
+      remove.setAttribute("aria-label", "默认代理 Key 为系统保留，不可删除");
+    }
     edit.addEventListener("click", () => openProxyKeyEditor(key));
     reset.addEventListener("click", () => resetProxyKeyUsage(key));
     remove.addEventListener("click", () => deleteProxyKey(key));
@@ -1406,6 +1428,7 @@ function renderCredentials(account, field, heading, buttonLabel) {
 
 function configPayload() {
   return {
+    revision: state.config?.revision ?? null,
     accounts: state.draft.accounts.map((account) => ({
       id: account.id,
       name: account.name,
@@ -1427,6 +1450,18 @@ function configPayload() {
       })),
     })),
   };
+}
+
+function draftFingerprint() {
+  return state.draft ? JSON.stringify(configPayload()) : "";
+}
+
+function rememberDraftBaseline() {
+  state.draftBaseline = draftFingerprint();
+}
+
+function configDraftIsDirty() {
+  return Boolean(state.draft && draftFingerprint() !== state.draftBaseline);
 }
 
 async function refreshStatus() {
@@ -1455,6 +1490,7 @@ async function reloadAccounts() {
     state.config = config;
     state.draft = structuredClone(config);
     markPersistedAccounts();
+    rememberDraftBaseline();
     renderAll();
     showToast("配置已重载");
   } catch (error) {
@@ -1504,11 +1540,17 @@ async function saveConfig() {
     state.config = await requestJson("/admin/v1/config");
     state.draft = structuredClone(state.config);
     markPersistedAccounts();
+    rememberDraftBaseline();
     state.status = await requestJson("/admin/v1/accounts");
     renderAll();
     showToast(`配置已保存 · 代次 ${result.reload.generation}`);
   } catch (error) {
-    showToast(error.message, true);
+    showToast(
+      error.message === "config_revision_conflict"
+        ? "服务端账号配置已更新，请载入最新配置后重新修改"
+        : error.message,
+      true,
+    );
   } finally {
     setBusy(button, false);
   }
@@ -1530,11 +1572,11 @@ function setAccountDeleteUiBusy(busy) {
   if (!busy) {
     return;
   }
-  for (const candidate of document.querySelectorAll("[data-account-delete]")) {
+  for (const candidate of document.querySelectorAll(
+    "#config-form input, #config-form button, #config-form select, [data-account-delete]",
+  )) {
     candidate.disabled = true;
   }
-  byId("add-account").disabled = true;
-  byId("save-config").disabled = true;
 }
 
 function removeDeletedAccountLocally(accountId) {
@@ -1565,32 +1607,13 @@ function removeDeletedAccountLocally(accountId) {
   state.tests.delete(accountId);
 }
 
-function mergeDraftWithConfig(config) {
-  const currentAccounts = state.draft && Array.isArray(state.draft.accounts)
-    ? state.draft.accounts
-    : [];
-  const currentPersisted = new Map(
-    currentAccounts
-      .filter((account) => account.persisted)
-      .map((account) => [account.id, account]),
-  );
-  const persistedAccounts = config.accounts.map((account) => {
-    const current = currentPersisted.get(account.id);
-    if (current) {
-      return current;
-    }
-    const added = structuredClone(account);
-    added.persisted = true;
-    return added;
-  });
-  const unsavedAccounts = currentAccounts.filter((account) => !account.persisted);
-  state.draft = structuredClone(config);
-  state.draft.accounts = [...persistedAccounts, ...unsavedAccounts];
-}
-
 async function deleteAccount(accountId, button) {
   if (state.deletingAccountId) {
     showToast(`账号 ${state.deletingAccountId} 正在删除，请稍候`, true);
+    return;
+  }
+  if (configDraftIsDirty()) {
+    showToast("请先保存或载入最新配置，再删除账号", true);
     return;
   }
   const confirmed = window.confirm(
@@ -1610,7 +1633,6 @@ async function deleteAccount(accountId, button) {
     });
     deleteApplied = true;
     removeDeletedAccountLocally(accountId);
-    renderAll();
 
     const [statusResult, configResult] = await Promise.allSettled([
       requestJson("/admin/v1/accounts"),
@@ -1624,7 +1646,9 @@ async function deleteAccount(accountId, button) {
     }
     if (configResult.status === "fulfilled") {
       state.config = configResult.value;
-      mergeDraftWithConfig(configResult.value);
+      state.draft = structuredClone(configResult.value);
+      markPersistedAccounts();
+      rememberDraftBaseline();
     } else {
       failedRefreshes.push("账号配置");
     }

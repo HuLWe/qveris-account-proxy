@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -23,6 +24,7 @@ from .access_keys import (
 from .admin import (
     AdminConfigError,
     parse_admin_accounts,
+    parse_admin_accounts_submission,
     public_config,
     serialize_accounts,
     write_accounts_atomic,
@@ -245,9 +247,18 @@ class ProxyService:
     async def run_credential_reloader(self, stop_event: asyncio.Event) -> None:
         if self._credential_reloader is None:
             return
-        await self._credential_reloader.run(stop_event)
+        interval = self.settings.accounts_reload_interval_seconds
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except TimeoutError:
+                await self.reload_accounts(force=False)
 
     async def reload_accounts(self, *, force: bool = True) -> ReloadResult:
+        async with self._admin_config_lock:
+            return await self._reload_accounts_locked(force=force)
+
+    async def _reload_accounts_locked(self, *, force: bool = True) -> ReloadResult:
         if self._credential_reloader is None:
             return ReloadResult(
                 applied=False,
@@ -309,6 +320,18 @@ class ProxyService:
     def admin_config(self) -> dict[str, object]:
         return public_config(self.settings)
 
+    async def admin_config_snapshot(self) -> dict[str, object]:
+        async with self._admin_config_lock:
+            if self._credential_reloader is not None:
+                await self._reload_accounts_locked(force=False)
+            config = self.admin_config()
+            config["revision"] = self._admin_config_revision()
+            return config
+
+    def _admin_config_revision(self) -> str:
+        payload = serialize_accounts(self.settings.accounts)
+        return hashlib.sha256(payload).hexdigest()
+
     def validate_admin_config(self, payload: bytes) -> dict[str, object]:
         accounts = parse_admin_accounts(payload, self.settings.accounts)
         try:
@@ -344,8 +367,18 @@ class ProxyService:
             return result
 
     async def _save_admin_config_locked(self, payload: bytes) -> ReloadResult:
-        accounts = parse_admin_accounts(payload, self.settings.accounts)
+        await self._sync_pending_admin_config_locked()
+        accounts, _ = parse_admin_accounts_submission(
+            payload,
+            self.settings.accounts,
+            current_revision=self._admin_config_revision(),
+        )
         return await self._persist_admin_accounts_locked(accounts)
+
+    async def _sync_pending_admin_config_locked(self) -> None:
+        result = await self._reload_accounts_locked(force=False)
+        if result.error is not None:
+            raise AdminConfigError("config_reload_failed")
 
     async def delete_admin_account(self, account_id: str) -> ReloadResult:
         if not self.settings.config_write_enabled:
@@ -368,6 +401,7 @@ class ProxyService:
             return result
 
     async def _delete_admin_account_locked(self, account_id: str) -> ReloadResult:
+        await self._sync_pending_admin_config_locked()
         if not any(account.id == account_id for account in self.settings.accounts):
             raise AdminConfigError("account_not_found")
         if len(self.settings.accounts) == 1:
@@ -395,7 +429,7 @@ class ProxyService:
         assert path is not None
 
         await asyncio.to_thread(write_accounts_atomic, path, candidate_payload)
-        result = await self.reload_accounts(force=True)
+        result = await self._reload_accounts_locked(force=True)
         if result.error is None:
             applied_pool = self.pool
             try:
@@ -412,7 +446,7 @@ class ProxyService:
 
         try:
             await asyncio.to_thread(write_accounts_atomic, path, current_payload)
-            rollback = await self.reload_accounts(force=True)
+            rollback = await self._reload_accounts_locked(force=True)
         except Exception as exc:
             logger.error("admin configuration rollback failed: %s", type(exc).__name__)
             raise AdminConfigError("apply_and_rollback_failed") from None
