@@ -207,7 +207,7 @@ class ProxySettings(BaseModel):
     def effective_default_account(self) -> str | None:
         if self.default_account is not None:
             return self.default_account
-        if len(self.accounts) == 1:
+        if len(self.accounts) == 1 or self.routing_mode == "round_robin":
             return self.accounts[0].id
         return None
 

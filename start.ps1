@@ -286,6 +286,14 @@ except UnicodeDecodeError as error:
 if not re.fullmatch(r"[A-Za-z0-9._-]{8,4096}", api_key):
     raise RuntimeError("invalid API key")
 
+profile_id = secrets.token_hex(16)
+accept_language = secrets.choice(
+    (
+        "zh-CN,zh;q=0.9,en;q=0.8",
+        "zh-CN,zh;q=0.9",
+        "en-US,en;q=0.9,zh-CN;q=0.8",
+    )
+)
 document = {
     "accounts": [
         {
@@ -294,8 +302,8 @@ document = {
             "requests_per_minute": 10,
             "burst": 10,
             "transport": {
-                "user_agent": "qveris-account-proxy/account-a",
-                "accept_language": "zh-CN,zh;q=0.9",
+                "user_agent": f"qveris-account-proxy/0.1.0 profile/{profile_id}",
+                "accept_language": accept_language,
             },
             "keys": [{"id": "primary", "api_key": api_key}],
             "oauth_tokens": [],
@@ -400,7 +408,7 @@ try {
     }
     $resolvedBind = Resolve-BindAddress -Value $bindInput
     $defaultAccount = if ([string]::IsNullOrWhiteSpace($env:QVP_DEFAULT_ACCOUNT)) {
-        "account-a"
+        ""
     }
     else {
         $env:QVP_DEFAULT_ACCOUNT.Trim()
@@ -612,7 +620,7 @@ try {
         Write-Host "未自动识别局域网地址：请把 LAN_IP 换成这台电脑的 IPv4 地址，或设置 QVP_LAN_HOST 后重启。" -ForegroundColor Yellow
     }
     if ($autoConnect) {
-        Write-Host "管理页已自动连接；可在页面右上角显示或复制代理 API Key。"
+        Write-Host "管理页已自动连接；可在“运行状态”的“接入应用”区域显示或复制代理 API Key。"
     }
     else {
         Write-Host "自动连接链接生成失败。请运行下面的命令显示代理 API Key，再在管理页展开“手动连接”：" -ForegroundColor Yellow

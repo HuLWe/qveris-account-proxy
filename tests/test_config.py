@@ -72,9 +72,12 @@ def test_account_can_hold_only_an_oauth_token() -> None:
     assert len(settings.accounts[0].oauth_tokens) == 1
 
 
-def test_multiple_accounts_require_explicit_or_configured_default() -> None:
+def test_multiple_accounts_use_a_dynamic_default_only_for_round_robin() -> None:
     settings = make_settings(multiple_accounts=True)
     assert settings.effective_default_account is None
+
+    round_robin = make_settings(multiple_accounts=True, routing_mode="round_robin")
+    assert round_robin.effective_default_account == "account-a"
 
     settings_with_default = make_settings(
         multiple_accounts=True, default_account="account-b"

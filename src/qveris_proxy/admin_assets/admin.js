@@ -11,6 +11,7 @@ const state = {
   operations: [],
   tests: new Map(),
   apiKeyVisible: false,
+  deletingAccountId: null,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -103,6 +104,26 @@ async function copyApiKey() {
   showToast(copied ? "API Key 已复制" : "复制失败，请检查剪贴板权限", !copied);
 }
 
+function apiBaseUrl() {
+  return `${window.location.origin}/api/v1`;
+}
+
+async function copyBaseUrl() {
+  const copied = await copyText(apiBaseUrl());
+  showToast(copied ? "API Base URL 已复制" : "复制失败，请检查剪贴板权限", !copied);
+}
+
+async function copyConnection() {
+  if (!state.token) {
+    showToast("请先连接代理", true);
+    return;
+  }
+  const copied = await copyText(
+    `Base URL: ${apiBaseUrl()}\nAPI Key: ${state.token}`,
+  );
+  showToast(copied ? "接入配置已复制" : "复制失败，请检查剪贴板权限", !copied);
+}
+
 function maskedApiKey(token) {
   if (token.length <= 10) {
     return "•".repeat(token.length);
@@ -122,6 +143,10 @@ function setApiKeyVisibility(visible) {
     "aria-pressed",
     state.apiKeyVisible ? "true" : "false",
   );
+  byId("toggle-api-key").setAttribute(
+    "aria-label",
+    state.apiKeyVisible ? "隐藏代理 API Key" : "显示代理 API Key",
+  );
 }
 
 function setManualKeyVisibility(visible) {
@@ -129,6 +154,10 @@ function setManualKeyVisibility(visible) {
   field.type = visible ? "text" : "password";
   byId("toggle-manual-key").textContent = visible ? "隐藏" : "显示";
   byId("toggle-manual-key").setAttribute("aria-pressed", visible ? "true" : "false");
+  byId("toggle-manual-key").setAttribute(
+    "aria-label",
+    visible ? "隐藏代理 API Key 输入值" : "显示代理 API Key 输入值",
+  );
 }
 
 async function exchangeBootstrapTicket(ticket) {
@@ -258,9 +287,9 @@ async function connect(token) {
     byId("api-version").textContent = `API ${catalog.api_version}`;
     byId("locked-state").hidden = true;
     byId("workspace").hidden = false;
-    byId("api-key-tools").hidden = false;
-    byId("copy-api-key").hidden = false;
+    byId("topbar-actions").hidden = false;
     byId("disconnect").hidden = false;
+    byId("api-base-url").textContent = apiBaseUrl();
     byId("access-token").value = "";
     byId("manual-connect").open = false;
     setManualKeyVisibility(false);
@@ -280,10 +309,10 @@ function resetWorkspace() {
   state.draft = null;
   state.operations = [];
   state.tests.clear();
+  state.deletingAccountId = null;
   byId("workspace").hidden = true;
   byId("locked-state").hidden = false;
-  byId("api-key-tools").hidden = true;
-  byId("copy-api-key").hidden = true;
+  byId("topbar-actions").hidden = true;
   byId("disconnect").hidden = true;
   byId("access-token").value = "";
   setManualKeyVisibility(false);
@@ -339,6 +368,12 @@ function renderStatus() {
     return;
   }
   const accounts = payload.accounts || [];
+  const routingMode = state.config && state.config.routing
+    ? state.config.routing.mode
+    : "round_robin";
+  byId("pool-summary").textContent = routingMode === "round_robin"
+    ? `${accounts.length} 个账号 · 可用账号按权重轮询`
+    : `${accounts.length} 个账号 · 显式选择账号`;
   const metrics = byId("metrics");
   clear(metrics);
   appendMetric(metrics, "账号", accounts.length);
@@ -440,13 +475,58 @@ function renderStatus() {
     );
 
     const action = node("td", { className: "command-column" });
+    const actionGroup = node("div", { className: "row-actions" });
     const testButton = node("button", {
       className: "secondary",
       text: state.tests.get(account.id) || "测试",
       type: "button",
     });
+    testButton.setAttribute("aria-label", `测试账号 ${account.id}`);
     testButton.addEventListener("click", () => testAccount(account.id, testButton));
-    action.append(testButton);
+    const deleteButton = node("button", {
+      className: "danger",
+      text: "删除",
+      type: "button",
+    });
+    const writable = Boolean(
+      state.config && state.config.capabilities.persistent_editing,
+    );
+    deleteButton.dataset.accountDelete = "true";
+    const deleteInProgress = Boolean(state.deletingAccountId);
+    const explicitDefault = Boolean(
+      state.config &&
+      state.config.routing &&
+      state.config.routing.configured_default_account === account.id,
+    );
+    const deleteBlockedReason = !writable
+      ? "持久编辑未启用"
+      : accounts.length <= 1
+        ? "至少保留一个账号"
+        : explicitDefault
+          ? "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT"
+          : "删除账号及已保存凭据";
+    deleteButton.disabled =
+      deleteInProgress || deleteBlockedReason !== "删除账号及已保存凭据";
+    deleteButton.title = deleteBlockedReason;
+    deleteButton.textContent = !writable
+      ? "只读"
+      : accounts.length <= 1
+        ? "保留"
+        : explicitDefault
+          ? "默认账号"
+          : state.deletingAccountId === account.id
+            ? "删除中"
+            : "删除";
+    deleteButton.setAttribute(
+      "aria-label",
+      deleteButton.disabled && !deleteInProgress
+        ? `${account.id}：${deleteButton.title}`
+        : `删除账号 ${account.id}`,
+    );
+    deleteButton.addEventListener("click", () =>
+      deleteAccount(account.id, deleteButton));
+    actionGroup.append(testButton, deleteButton);
+    action.append(actionGroup);
 
     row.append(identity, credentials, quota, rate, cooldown, network, action);
     body.append(row);
@@ -479,13 +559,40 @@ function makeInput(type, value, onInput, options = {}) {
   return input;
 }
 
+const CONNECTION_LANGUAGES = [
+  "zh-CN,zh;q=0.9,en;q=0.8",
+  "zh-CN,zh;q=0.9",
+  "en-US,en;q=0.9,zh-CN;q=0.8",
+];
+
+function createConnectionProfile() {
+  if (!window.crypto || typeof window.crypto.getRandomValues !== "function") {
+    throw new Error("浏览器随机数功能不可用");
+  }
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  const profileId = [...bytes]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+  return {
+    user_agent: `qveris-account-proxy/0.1.0 profile/${profileId}`,
+    accept_language: CONNECTION_LANGUAGES[bytes[0] % CONNECTION_LANGUAGES.length],
+  };
+}
+
+function connectionProfileLabel(userAgent) {
+  const match = /profile\/([a-f0-9]{32})$/.exec(userAgent || "");
+  return match ? `标识 ${match[1].slice(-8)}` : "自定义标识";
+}
+
 function renderConfig() {
   if (!state.draft) {
     return;
   }
   const writable = Boolean(state.config.capabilities.persistent_editing);
   byId("config-mode").textContent = writable ? "持久编辑已启用" : "持久编辑未启用";
-  byId("save-config").disabled = !writable;
+  byId("add-account").disabled = !writable || Boolean(state.deletingAccountId);
+  byId("save-config").disabled = !writable || Boolean(state.deletingAccountId);
   const summary = byId("config-summary");
   summary.dataset.state = writable ? "ok" : "warning";
   summary.textContent = `${state.draft.accounts.length} 个账号 · ${state.config.routing.mode} · 默认账号 ${state.config.routing.default_account || "未设置"}`;
@@ -507,7 +614,45 @@ function renderAccountEditor(account, accountIndex) {
     text: "删除账号",
     type: "button",
   });
+  const writable = Boolean(state.config.capabilities.persistent_editing);
+  remove.dataset.accountDelete = "true";
+  const deleteInProgress = Boolean(state.deletingAccountId);
+  const explicitDefault = Boolean(
+    account.persisted &&
+    state.config.routing &&
+    state.config.routing.configured_default_account === account.id,
+  );
+  const deleteBlockedReason = !writable
+    ? "持久编辑未启用"
+    : account.persisted && state.config.accounts.length <= 1
+      ? "至少保留一个账号"
+      : explicitDefault
+        ? "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT"
+        : "删除账号及已保存凭据";
+  remove.disabled = account.persisted
+    ? deleteInProgress || deleteBlockedReason !== "删除账号及已保存凭据"
+    : deleteInProgress;
+  remove.title = deleteBlockedReason;
+  remove.textContent = account.persisted && !writable
+    ? "只读"
+    : account.persisted && state.config.accounts.length <= 1
+      ? "保留账号"
+      : explicitDefault
+        ? "默认账号"
+        : state.deletingAccountId === account.id
+          ? "删除中"
+          : "删除账号";
+  remove.setAttribute(
+    "aria-label",
+    remove.disabled && !deleteInProgress
+      ? `${account.id || "新账号"}：${remove.title}`
+      : `删除账号 ${account.id || "新账号"}`,
+  );
   remove.addEventListener("click", () => {
+    if (account.persisted) {
+      deleteAccount(account.id, remove);
+      return;
+    }
     state.draft.accounts.splice(accountIndex, 1);
     renderConfig();
   });
@@ -542,12 +687,46 @@ function renderAccountEditor(account, accountIndex) {
     ),
   );
 
+  const transportSection = node("section", {
+    className: "connection-profile-section",
+  });
+  const transportHeading = node("div", { className: "connection-profile-heading" });
+  const transportIdentity = node("div");
+  const transportIdentityState = node("span", {
+    text: connectionProfileLabel(account.transport.user_agent),
+  });
+  transportIdentity.append(
+    node("strong", { text: "稳定连接标识" }),
+    transportIdentityState,
+  );
+  const regenerateProfile = node("button", {
+    className: "secondary",
+    text: "重新生成",
+    type: "button",
+  });
+  regenerateProfile.disabled = !writable;
+  regenerateProfile.title = "生成并固定新的 User-Agent 和语言";
+  regenerateProfile.setAttribute(
+    "aria-label",
+    `重新生成账号 ${account.id || "新账号"} 的稳定连接标识`,
+  );
+  regenerateProfile.addEventListener("click", () => {
+    try {
+      Object.assign(account.transport, createConnectionProfile());
+      renderConfig();
+      showToast("连接标识已生成，保存后生效");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+  transportHeading.append(transportIdentity, regenerateProfile);
   const transport = node("div", { className: "transport-fields" });
   transport.append(
     makeLabel(
       "User-Agent",
       makeInput("text", account.transport.user_agent, (value) => {
         account.transport.user_agent = value;
+        transportIdentityState.textContent = connectionProfileLabel(value);
       }, { required: true }),
     ),
     makeLabel(
@@ -563,13 +742,14 @@ function renderAccountEditor(account, accountIndex) {
       }),
     ),
   );
+  transportSection.append(transportHeading, transport);
 
   const credentials = node("div", { className: "credentials" });
   credentials.append(
     renderCredentials(account, "keys", "API Key", "Key"),
     renderCredentials(account, "oauth_tokens", "OAuth Token", "OAuth"),
   );
-  editor.append(header, fields, transport, credentials);
+  editor.append(header, fields, transportSection, credentials);
   return editor;
 }
 
@@ -582,6 +762,11 @@ function renderCredentials(account, field, heading, buttonLabel) {
     text: `添加 ${buttonLabel}`,
     type: "button",
   });
+  add.disabled = !state.config.capabilities.persistent_editing;
+  add.setAttribute(
+    "aria-label",
+    `为账号 ${account.id || "新账号"} 添加 ${heading}`,
+  );
   add.addEventListener("click", () => {
     account[field].push({
       id: account[field].length ? `credential-${account[field].length + 1}` : "primary",
@@ -618,6 +803,11 @@ function renderCredentials(account, field, heading, buttonLabel) {
       text: "删除",
       type: "button",
     });
+    remove.disabled = !state.config.capabilities.persistent_editing;
+    remove.setAttribute(
+      "aria-label",
+      `删除账号 ${account.id || "新账号"} 的 ${heading} ${credential.id || credentialIndex + 1}`,
+    );
     remove.addEventListener("click", () => {
       account[field].splice(credentialIndex, 1);
       renderConfig();
@@ -735,6 +925,151 @@ async function saveConfig() {
     showToast(error.message, true);
   } finally {
     setBusy(button, false);
+  }
+}
+
+function deleteErrorMessage(code) {
+  return {
+    account_not_found: "账号已不存在，请刷新状态",
+    default_account_locked: "该账号是显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT",
+    last_account_required: "至少保留一个账号",
+    persistent_editing_disabled: "持久编辑未启用",
+    accounts_file_unavailable: "账号配置文件不可用，删除未执行",
+    apply_failed: "删除未完成，原账号配置已恢复",
+    apply_and_rollback_failed: "删除失败且回滚异常，请重载配置后检查",
+  }[code] || code;
+}
+
+function setAccountDeleteUiBusy(busy) {
+  if (!busy) {
+    return;
+  }
+  for (const candidate of document.querySelectorAll("[data-account-delete]")) {
+    candidate.disabled = true;
+  }
+  byId("add-account").disabled = true;
+  byId("save-config").disabled = true;
+}
+
+function removeDeletedAccountLocally(accountId) {
+  if (state.status && Array.isArray(state.status.accounts)) {
+    state.status.accounts = state.status.accounts.filter(
+      (account) => account.id !== accountId,
+    );
+  }
+  if (state.config && Array.isArray(state.config.accounts)) {
+    state.config.accounts = state.config.accounts.filter(
+      (account) => account.id !== accountId,
+    );
+    if (
+      state.config.routing &&
+      state.config.routing.mode === "round_robin" &&
+      state.config.routing.default_account === accountId
+    ) {
+      state.config.routing.default_account = state.config.accounts.length
+        ? state.config.accounts[0].id
+        : null;
+    }
+  }
+  if (state.draft && Array.isArray(state.draft.accounts)) {
+    state.draft.accounts = state.draft.accounts.filter(
+      (account) => !(account.persisted && account.id === accountId),
+    );
+  }
+  state.tests.delete(accountId);
+}
+
+function mergeDraftWithConfig(config) {
+  const currentAccounts = state.draft && Array.isArray(state.draft.accounts)
+    ? state.draft.accounts
+    : [];
+  const currentPersisted = new Map(
+    currentAccounts
+      .filter((account) => account.persisted)
+      .map((account) => [account.id, account]),
+  );
+  const persistedAccounts = config.accounts.map((account) => {
+    const current = currentPersisted.get(account.id);
+    if (current) {
+      return current;
+    }
+    const added = structuredClone(account);
+    added.persisted = true;
+    return added;
+  });
+  const unsavedAccounts = currentAccounts.filter((account) => !account.persisted);
+  state.draft = structuredClone(config);
+  state.draft.accounts = [...persistedAccounts, ...unsavedAccounts];
+}
+
+async function deleteAccount(accountId, button) {
+  if (state.deletingAccountId) {
+    showToast(`账号 ${state.deletingAccountId} 正在删除，请稍候`, true);
+    return;
+  }
+  if (!state.config || state.config.accounts.length <= 1) {
+    showToast("至少保留一个账号", true);
+    return;
+  }
+  if (state.config.routing?.configured_default_account === accountId) {
+    showToast("该账号是显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT", true);
+    return;
+  }
+  const confirmed = window.confirm(
+    `确认删除账号“${accountId}”及其已保存凭据？此操作立即生效。`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  state.deletingAccountId = accountId;
+  setAccountDeleteUiBusy(true);
+  setBusy(button, true);
+  let deleteApplied = false;
+  try {
+    await requestJson(`/admin/v1/accounts/${encodeURIComponent(accountId)}`, {
+      method: "DELETE",
+    });
+    deleteApplied = true;
+    removeDeletedAccountLocally(accountId);
+    renderAll();
+
+    const [statusResult, configResult] = await Promise.allSettled([
+      requestJson("/admin/v1/accounts"),
+      requestJson("/admin/v1/config"),
+    ]);
+    const failedRefreshes = [];
+    if (statusResult.status === "fulfilled") {
+      state.status = statusResult.value;
+    } else {
+      failedRefreshes.push("运行状态");
+    }
+    if (configResult.status === "fulfilled") {
+      state.config = configResult.value;
+      mergeDraftWithConfig(configResult.value);
+    } else {
+      failedRefreshes.push("账号配置");
+    }
+    renderAll();
+    showToast(
+      failedRefreshes.length
+        ? `${accountId} 已删除；${failedRefreshes.join("和")}刷新失败，请手动刷新`
+        : `${accountId} 已删除`,
+      failedRefreshes.length > 0,
+    );
+  } catch (error) {
+    if (deleteApplied) {
+      removeDeletedAccountLocally(accountId);
+      renderAll();
+      showToast(`${accountId} 已删除；页面刷新失败，请手动刷新`, true);
+    } else {
+      showToast(deleteErrorMessage(error.message), true);
+    }
+  } finally {
+    state.deletingAccountId = null;
+    setBusy(button, false);
+    renderStatus();
+    renderConfig();
   }
 }
 
@@ -920,6 +1255,8 @@ byId("auth-form").addEventListener("submit", (event) => {
 
 byId("disconnect").addEventListener("click", disconnect);
 byId("copy-api-key").addEventListener("click", copyApiKey);
+byId("copy-base-url").addEventListener("click", copyBaseUrl);
+byId("copy-connection").addEventListener("click", copyConnection);
 byId("toggle-api-key").addEventListener("click", () => {
   setApiKeyVisibility(!state.apiKeyVisible);
 });
@@ -932,14 +1269,20 @@ byId("test-gateway").addEventListener("click", testGateway);
 byId("validate-config").addEventListener("click", validateConfig);
 byId("save-config").addEventListener("click", saveConfig);
 byId("add-account").addEventListener("click", () => {
+  let connectionProfile;
+  try {
+    connectionProfile = createConnectionProfile();
+  } catch (error) {
+    showToast(error.message, true);
+    return;
+  }
   state.draft.accounts.push({
     id: "",
     weight: 1,
     requests_per_minute: 10,
     burst: 10,
     transport: {
-      user_agent: "qveris-account-proxy/0.1.0",
-      accept_language: "en-US,en;q=0.9",
+      ...connectionProfile,
       proxy_url_file: null,
     },
     keys: [{ id: "primary", configured: false, value: "" }],

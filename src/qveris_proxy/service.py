@@ -315,10 +315,50 @@ class ProxyService:
 
     async def _save_admin_config_locked(self, payload: bytes) -> ReloadResult:
         accounts = parse_admin_accounts(payload, self.settings.accounts)
+        return await self._persist_admin_accounts_locked(accounts)
+
+    async def delete_admin_account(self, account_id: str) -> ReloadResult:
+        if not self.settings.config_write_enabled:
+            raise AdminConfigError("persistent_editing_disabled")
+        if self.settings.accounts_file_path is None:
+            raise AdminConfigError("accounts_file_unavailable")
+
+        async with self._admin_config_lock:
+            delete_task = asyncio.create_task(
+                self._delete_admin_account_locked(account_id)
+            )
+            cancelled: asyncio.CancelledError | None = None
+            try:
+                result = await asyncio.shield(delete_task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+                result = await delete_task
+            if cancelled is not None:
+                raise cancelled
+            return result
+
+    async def _delete_admin_account_locked(self, account_id: str) -> ReloadResult:
+        if not any(account.id == account_id for account in self.settings.accounts):
+            raise AdminConfigError("account_not_found")
+        if len(self.settings.accounts) == 1:
+            raise AdminConfigError("last_account_required")
+        if self.settings.default_account == account_id:
+            raise AdminConfigError("default_account_locked")
+        accounts = tuple(
+            account for account in self.settings.accounts if account.id != account_id
+        )
+        return await self._persist_admin_accounts_locked(accounts)
+
+    async def _persist_admin_accounts_locked(
+        self, accounts: tuple[AccountConfig, ...]
+    ) -> ReloadResult:
         try:
             candidate = self._candidate_settings(accounts)
         except ConfigurationError:
             raise AdminConfigError("invalid_config") from None
+        removed_account_ids = {
+            account.id for account in self.settings.accounts
+        } - {account.id for account in candidate.accounts}
         current_payload = serialize_accounts(self.settings.accounts)
         candidate_payload = serialize_accounts(candidate.accounts)
         path = self.settings.accounts_file_path
@@ -327,7 +367,18 @@ class ProxyService:
         await asyncio.to_thread(write_accounts_atomic, path, candidate_payload)
         result = await self.reload_accounts(force=True)
         if result.error is None:
-            return result
+            applied_pool = self.pool
+            try:
+                await self._purge_removed_accounts(
+                    removed_account_ids, expected_pool=applied_pool
+                )
+            except Exception as exc:
+                logger.error(
+                    "removed account state cleanup failed: %s",
+                    type(exc).__name__,
+                )
+            else:
+                return result
 
         try:
             await asyncio.to_thread(write_accounts_atomic, path, current_payload)
@@ -338,6 +389,19 @@ class ProxyService:
         if rollback.error is not None:
             raise AdminConfigError("apply_and_rollback_failed")
         raise AdminConfigError("apply_failed")
+
+    async def _purge_removed_accounts(
+        self, account_ids: set[str], *, expected_pool: KeyPool
+    ) -> None:
+        if not account_ids:
+            return
+        configuration_lease = await self._gate.acquire()
+        try:
+            if self.pool is not expected_pool:
+                raise RuntimeError("account configuration changed during cleanup")
+            await self.state.purge_accounts(account_ids)
+        finally:
+            await configuration_lease.release()
 
     def authenticate(self, request: Request) -> None:
         raw = request.headers.get("authorization", "")
@@ -383,6 +447,7 @@ class ProxyService:
             self._semaphore.release()
             raise
 
+        request_pool = self.pool
         lease: KeyLease | None = None
         transport_lease: AccountClientLease | None = None
         account_id: str | None = None
@@ -506,6 +571,7 @@ class ProxyService:
                     lease,
                     response.status_code,
                     {name.lower(): value for name, value in response.headers.items()},
+                    expected_pool=request_pool,
                 )
             await configuration_lease.release()
 
@@ -550,15 +616,18 @@ class ProxyService:
                     completed = True
                 except (httpx.TimeoutException, httpx.TransportError):
                     if response.status_code < 500:
-                        await self._save_transport_failure(lease)
+                        await self._save_transport_failure(
+                            lease, expected_pool=request_pool
+                        )
                     raise
                 finally:
                     try:
                         if completed and account_id is not None and captured:
-                            await self.state.set_affinities(
+                            await self._set_affinities_for_pool(
                                 self._response_affinity_values(bytes(captured)),
                                 account_id,
                                 affinity_ttl_seconds,
+                                expected_pool=request_pool,
                             )
                     finally:
                         await closer()
@@ -578,7 +647,7 @@ class ProxyService:
             )
             raise
         except httpx.TimeoutException:
-            await self._save_transport_failure(lease)
+            await self._save_transport_failure(lease, expected_pool=request_pool)
             await self._cleanup_failed_request(
                 response,
                 lease,
@@ -589,7 +658,7 @@ class ProxyService:
                 status_code=504, detail="QVeris upstream timed out"
             ) from None
         except httpx.TransportError:
-            await self._save_transport_failure(lease)
+            await self._save_transport_failure(lease, expected_pool=request_pool)
             await self._cleanup_failed_request(
                 response,
                 lease,
@@ -632,14 +701,42 @@ class ProxyService:
                     finally:
                         await configuration_lease.release()
 
-    async def _save_transport_failure(self, lease: KeyLease | None) -> None:
+    async def _set_affinities_for_pool(
+        self,
+        values: set[str],
+        account_id: str,
+        ttl_seconds: float,
+        *,
+        expected_pool: KeyPool,
+    ) -> None:
+        configuration_lease = await self._gate.acquire()
+        try:
+            if self.pool is not expected_pool or not expected_pool.has_account(
+                account_id
+            ):
+                return
+            await self.state.set_affinities(values, account_id, ttl_seconds)
+        finally:
+            await configuration_lease.release()
+
+    async def _save_transport_failure(
+        self, lease: KeyLease | None, *, expected_pool: KeyPool
+    ) -> None:
         if lease is None:
             return
         try:
-            async with self._transition_lock(lease.account_id):
-                transition = await lease.report_transport_failure()
-                await self.state.save_cooldown(transition)
-                await self.pool.restore_cooldowns([transition])
+            configuration_lease = await self._gate.acquire()
+            try:
+                if self.pool is not expected_pool or not expected_pool.has_account(
+                    lease.account_id
+                ):
+                    return
+                async with self._transition_lock(lease.account_id):
+                    transition = await lease.report_transport_failure()
+                    await self.state.save_cooldown(transition)
+                    await expected_pool.restore_cooldowns([transition])
+            finally:
+                await configuration_lease.release()
         except Exception as exc:
             logger.warning(
                 "failed to persist upstream transport state: %s",
@@ -651,7 +748,13 @@ class ProxyService:
         lease: KeyLease,
         status_code: int,
         headers: dict[str, str],
+        *,
+        expected_pool: KeyPool,
     ) -> None:
+        if self.pool is not expected_pool or not expected_pool.has_account(
+            lease.account_id
+        ):
+            return
         async with self._transition_lock(lease.account_id):
             transition = await lease.report_response(status_code, headers)
             if transition is not None:
@@ -663,7 +766,13 @@ class ProxyService:
         http_status: int,
         snapshot: dict[str, object],
         balance: float | None,
+        *,
+        expected_pool: KeyPool,
     ) -> None:
+        if self.pool is not expected_pool or not expected_pool.has_account(
+            lease.account_id
+        ):
+            return
         async with self._transition_lock(lease.account_id):
             transition = (
                 await lease.report_credit_balance(balance)
@@ -677,6 +786,18 @@ class ProxyService:
                 valid_snapshot=http_status == 200 and balance is not None,
                 transition=transition,
             )
+
+    async def _save_quota_snapshot_for_pool(
+        self,
+        account_id: str,
+        http_status: int,
+        snapshot: dict[str, object],
+        *,
+        expected_pool: KeyPool,
+    ) -> None:
+        if self.pool is not expected_pool or not expected_pool.has_account(account_id):
+            return
+        await self.state.save_quota_snapshot(account_id, http_status, snapshot)
 
     def _transition_lock(self, account_id: str) -> asyncio.Lock:
         return self._transition_locks.setdefault(account_id, asyncio.Lock())
@@ -810,6 +931,7 @@ class ProxyService:
             "auth/credits" if credential_kind == "api_key" else "auth/verify-token"
         )
         configuration_lease = await self._gate.acquire()
+        request_pool = self.pool
         lease: KeyLease | None = None
         transport_lease: AccountClientLease | None = None
         response: httpx.Response | None = None
@@ -839,6 +961,7 @@ class ProxyService:
                 lease,
                 response.status_code,
                 {name.lower(): value for name, value in response.headers.items()},
+                expected_pool=request_pool,
             )
             result = self._test_result(
                 credential_kind,
@@ -858,6 +981,7 @@ class ProxyService:
                     response.status_code,
                     snapshot,
                     balance,
+                    expected_pool=request_pool,
                 )
                 result["credits"] = snapshot
             return result
@@ -871,7 +995,7 @@ class ProxyService:
                 retry_after=exc.retry_after,
             )
         except (httpx.TimeoutException, httpx.TransportError):
-            await self._save_transport_failure(lease)
+            await self._save_transport_failure(lease, expected_pool=request_pool)
             return self._test_result(
                 credential_kind,
                 started,
@@ -933,6 +1057,7 @@ class ProxyService:
         results: list[dict[str, object]] = []
         for account_id in account_ids:
             configuration_lease = await self._gate.acquire()
+            request_pool = self.pool
             lease: KeyLease | None = None
             transport_lease: AccountClientLease | None = None
             response: httpx.Response | None = None
@@ -957,6 +1082,7 @@ class ProxyService:
                     lease,
                     response.status_code,
                     {name.lower(): value for name, value in response.headers.items()},
+                    expected_pool=request_pool,
                 )
                 snapshot = self._credit_snapshot(response)
                 balance = self._snapshot_credit_balance(snapshot)
@@ -965,6 +1091,7 @@ class ProxyService:
                     response.status_code,
                     snapshot,
                     balance,
+                    expected_pool=request_pool,
                 )
                 results.append(
                     {
@@ -975,7 +1102,9 @@ class ProxyService:
                 )
             except PoolUnavailable as exc:
                 status_code = 429 if exc.reason == "rate_limit" else 503
-                await self.state.save_quota_snapshot(account_id, status_code, {})
+                await self._save_quota_snapshot_for_pool(
+                    account_id, status_code, {}, expected_pool=request_pool
+                )
                 results.append(
                     {
                         "account": account_id,
@@ -984,8 +1113,12 @@ class ProxyService:
                     }
                 )
             except (httpx.TimeoutException, httpx.TransportError):
-                await self._save_transport_failure(lease)
-                await self.state.save_quota_snapshot(account_id, 0, {})
+                await self._save_transport_failure(
+                    lease, expected_pool=request_pool
+                )
+                await self._save_quota_snapshot_for_pool(
+                    account_id, 0, {}, expected_pool=request_pool
+                )
                 results.append({"account": account_id, "http_status": 0, "credits": {}})
             finally:
                 try:

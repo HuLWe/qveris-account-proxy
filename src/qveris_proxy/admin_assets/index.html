@@ -20,12 +20,8 @@
         <span class="state-dot" aria-hidden="true"></span>
         <span id="gateway-label">未连接</span>
       </div>
-      <div class="api-key-tools" id="api-key-tools" hidden>
-        <span class="api-key-label">代理 API Key</span>
-        <code id="api-key-display" aria-label="代理 API Key"></code>
-        <button type="button" class="secondary" id="toggle-api-key" aria-pressed="false">显示</button>
-        <button type="button" class="secondary" id="copy-api-key" hidden>复制</button>
-        <button type="button" class="secondary" id="disconnect" hidden>断开</button>
+      <div class="topbar-actions" id="topbar-actions" hidden>
+        <button type="button" class="secondary" id="disconnect" hidden>断开连接</button>
       </div>
     </header>
 
@@ -54,7 +50,7 @@
                 placeholder="粘贴终端命令显示的代理 API Key"
                 required
               >
-              <button type="button" class="secondary" id="toggle-manual-key" aria-pressed="false">显示</button>
+              <button type="button" class="secondary" id="toggle-manual-key" aria-label="显示代理 API Key 输入值" aria-pressed="false">显示</button>
               <button type="submit">连接</button>
             </div>
           </form>
@@ -83,6 +79,31 @@
               <button type="button" id="refresh-status">刷新状态</button>
             </div>
           </div>
+
+          <section class="connection-band" id="api-key-tools" aria-label="接入应用">
+            <div class="connection-band-heading">
+              <div>
+                <span>接入应用</span>
+                <strong id="pool-summary">账号池准备中</strong>
+              </div>
+              <button type="button" class="secondary" id="copy-connection" aria-label="复制全部接入配置">复制全部配置</button>
+            </div>
+            <div class="connection-values">
+              <div class="connection-value">
+                <span>API Base URL</span>
+                <code id="api-base-url" aria-label="API Base URL"></code>
+                <button type="button" class="secondary" id="copy-base-url" aria-label="复制 API Base URL">复制</button>
+              </div>
+              <div class="connection-value">
+                <span>代理 API Key</span>
+                <code id="api-key-display" aria-label="代理 API Key"></code>
+                <div class="connection-key-actions">
+                  <button type="button" class="secondary" id="toggle-api-key" aria-label="显示代理 API Key" aria-pressed="false">显示</button>
+                  <button type="button" class="secondary" id="copy-api-key" aria-label="复制代理 API Key">复制</button>
+                </div>
+              </div>
+            </div>
+          </section>
 
           <div class="metrics" id="metrics"></div>
           <div class="status-strip" id="reload-state"></div>

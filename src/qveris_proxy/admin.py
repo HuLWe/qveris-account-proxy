@@ -72,6 +72,7 @@ def public_config(settings: ProxySettings) -> dict[str, object]:
         "routing": {
             "mode": settings.routing_mode,
             "default_account": settings.effective_default_account,
+            "configured_default_account": settings.default_account,
         },
         "accounts": [
             {

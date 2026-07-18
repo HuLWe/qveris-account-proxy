@@ -226,6 +226,19 @@ def create_app(
         except KeyError:
             raise HTTPException(status_code=404, detail="account not found") from None
 
+    @application.delete("/admin/v1/accounts/{account_id}", include_in_schema=False)
+    async def delete_account(
+        account_id: str, request: Request, response: Response
+    ) -> dict[str, object]:
+        service = request.app.state.proxy_service
+        service.authenticate(request)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            result = await service.delete_admin_account(account_id)
+        except AdminConfigError as exc:
+            _raise_admin_config_error(str(exc))
+        return {"deleted": account_id, "reload": asdict(result)}
+
     @application.post("/admin/v1/refresh-credits", include_in_schema=False)
     async def refresh_credits(
         request: Request, response: Response
@@ -350,8 +363,11 @@ async def _read_bootstrap_exchange(request: Request) -> BootstrapExchangeInput:
 
 def _raise_admin_config_error(code: str) -> None:
     status_code = {
+        "account_not_found": 404,
         "persistent_editing_disabled": 403,
         "accounts_file_unavailable": 409,
+        "last_account_required": 409,
+        "default_account_locked": 409,
         "config_too_large": 413,
         "invalid_config": 400,
         "missing_api_key_value": 400,

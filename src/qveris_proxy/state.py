@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -322,6 +323,25 @@ class StateStore:
             }
             for row in rows
         }
+
+    async def purge_account(self, account_id: str) -> None:
+        await self.purge_accounts((account_id,))
+
+    async def purge_accounts(self, account_ids: Iterable[str]) -> None:
+        rows = tuple((account_id,) for account_id in dict.fromkeys(account_ids))
+        if not rows:
+            return
+        async with self._lock:
+            with self._connection:
+                self._connection.executemany(
+                    "DELETE FROM affinities WHERE account_id = ?", rows
+                )
+                self._connection.executemany(
+                    "DELETE FROM cooldowns WHERE account_id = ?", rows
+                )
+                self._connection.executemany(
+                    "DELETE FROM quota_snapshots WHERE account_id = ?", rows
+                )
 
     async def close(self) -> None:
         async with self._lock:

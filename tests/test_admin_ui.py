@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from qveris_proxy.admin import serialize_accounts
 from qveris_proxy.app import create_app
 from qveris_proxy.bootstrap import AdminBootstrapTickets
 from qveris_proxy.routes import PUBLIC_OPERATIONS, QVERIS_API_VERSION
+from qveris_proxy.state import StoredCooldown
 from conftest import (
     ACCESS_TOKEN,
     KEY_A1,
@@ -31,6 +33,18 @@ async def app_client(app) -> httpx.AsyncClient:
         transport=httpx.ASGITransport(app=app),
         base_url="http://proxy.test",
     )
+
+
+class _BlockingAdminResponseStream(httpx.AsyncByteStream):
+    def __init__(self, started: asyncio.Event, release: asyncio.Event) -> None:
+        self._started = started
+        self._release = release
+
+    async def __aiter__(self):
+        self._started.set()
+        yield b'{"search_id":"deleted-'
+        await self._release.wait()
+        yield b'stream"}'
 
 
 def editable_payload(*, weight: int = 1) -> dict[str, object]:
@@ -110,22 +124,37 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"resetWorkspace" in script.content
     assert b"window.navigator.clipboard.writeText" in script.content
     assert b'document.execCommand("copy")' in script.content
-    assert b'byId("copy-api-key").hidden = false' in script.content
-    assert b'byId("copy-api-key").hidden = true' in script.content
     assert b"innerHTML" not in script.content
     assert b"eval(" not in script.content
     assert b"https://qveris.ai/?ref=afAfj_c90cnWYg" in shell.content
     assert b"75gxF1vtvXWj_A" in shell.content
     assert b'rel="noopener noreferrer"' in shell.content
     assert b'class="onboarding-actions"' in shell.content
-    assert b'id="copy-api-key" hidden' in shell.content
+    assert b'id="copy-api-key"' in shell.content
     assert b'id="api-key-display"' in shell.content
     assert b'id="toggle-api-key"' in shell.content
+    assert b'id="api-base-url"' in shell.content
+    assert b'id="copy-base-url"' in shell.content
+    assert b'id="copy-connection"' in shell.content
+    assert b'id="pool-summary"' in shell.content
+    assert 'aria-label="接入应用"'.encode() in shell.content
+    assert 'aria-label="复制全部接入配置"'.encode() in shell.content
+    assert 'aria-label="复制 API Base URL"'.encode() in shell.content
+    assert 'aria-label="复制代理 API Key"'.encode() in shell.content
+    assert b'id="topbar-actions" hidden' in shell.content
     assert b'id="manual-connect"' in shell.content
     assert b">\xe5\xa4\x8d\xe5\x88\xb6</button>" in shell.content
+    assert b'window.crypto.getRandomValues' in script.content
+    assert b'window.confirm' in script.content
+    assert b'method: "DELETE"' in script.content
+    assert b"Promise.allSettled" in script.content
+    assert b"deletingAccountId" in script.content
+    assert b"account.persisted && account.id === accountId" in script.content
+    assert "稳定连接标识".encode() in script.content
     assert b"[hidden]" in stylesheet.content
     assert b"display: none !important" in stylesheet.content
     assert b".manual-connect:not([open]) > .manual-auth" in stylesheet.content
+    assert b"button.danger:hover:not(:disabled)" in stylesheet.content
     assert b".onboarding-actions" in stylesheet.content
     assert calls == 0
 
@@ -370,6 +399,204 @@ async def test_persistent_editing_preserves_existing_values_and_hot_reloads(
         "new-key",
     ]
     assert list(tmp_path.glob(".accounts-*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_account_delete_is_immediate_persistent_and_cleans_runtime_state(
+    tmp_path: Path,
+) -> None:
+    accounts_path = tmp_path / "accounts.json"
+    settings = make_settings(
+        multiple_accounts=True,
+        routing_mode="round_robin",
+        accounts_file_path=str(accounts_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    accounts_path.write_bytes(serialize_accounts(settings.accounts))
+    app = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+
+    async with LifespanManager(app):
+        service = app.state.proxy_service
+        await service.state.set_affinities({"delete-account-fixture"}, "account-a", 60)
+        await service.state.save_cooldown(
+            StoredCooldown(
+                scope="account",
+                account_id="account-a",
+                name="delete-fixture",
+                until_epoch=9_999_999_999,
+            )
+        )
+        await service.state.save_quota_snapshot(
+            "account-a", 200, {"remaining_credits": 12}
+        )
+
+        async with await app_client(app) as client:
+            denied = await client.delete("/admin/v1/accounts/account-a")
+            deleted = await client.delete(
+                "/admin/v1/accounts/account-a", headers=auth_headers()
+            )
+            config = await client.get("/admin/v1/config", headers=auth_headers())
+            status = await client.get("/admin/v1/accounts", headers=auth_headers())
+            unknown = await client.delete(
+                "/admin/v1/accounts/account-a", headers=auth_headers()
+            )
+            last = await client.delete(
+                "/admin/v1/accounts/account-b", headers=auth_headers()
+            )
+
+        assert await service.state.get_affinity("delete-account-fixture") is None
+        assert not any(
+            item.account_id == "account-a"
+            for item in await service.state.load_cooldowns()
+        )
+        assert "account-a" not in await service.state.quota_snapshots()
+
+    assert denied.status_code == 401
+    assert deleted.status_code == 200
+    assert deleted.headers["cache-control"] == "no-store"
+    assert deleted.json()["deleted"] == "account-a"
+    assert deleted.json()["reload"]["applied"] is True
+    assert config.json()["routing"]["default_account"] == "account-b"
+    assert config.json()["routing"]["configured_default_account"] is None
+    assert [item["id"] for item in config.json()["accounts"]] == ["account-b"]
+    assert [item["id"] for item in status.json()["accounts"]] == ["account-b"]
+    assert unknown.status_code == 404
+    assert unknown.json() == {"detail": "account_not_found"}
+    assert last.status_code == 409
+    assert last.json() == {"detail": "last_account_required"}
+    stored = json.loads(accounts_path.read_text(encoding="utf-8"))
+    assert [item["id"] for item in stored["accounts"]] == ["account-b"]
+    assert list(tmp_path.glob(".accounts-*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_during_stream_does_not_restore_removed_account_affinity(
+    tmp_path: Path,
+) -> None:
+    accounts_path = tmp_path / "accounts.json"
+    settings = make_settings(
+        multiple_accounts=True,
+        routing_mode="round_robin",
+        accounts_file_path=str(accounts_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    accounts_path.write_bytes(serialize_accounts(settings.accounts))
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    async def upstream(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            stream=_BlockingAdminResponseStream(stream_started, release_stream),
+        )
+
+    app = create_app(settings, transport=httpx.MockTransport(upstream))
+    async with LifespanManager(app):
+        service = app.state.proxy_service
+        async with await app_client(app) as slow_client, await app_client(app) as control:
+            slow_request = asyncio.create_task(
+                slow_client.post(
+                    "/api/v1/search",
+                    headers={
+                        **auth_headers(),
+                        "X-QVeris-Account": "account-a",
+                    },
+                    json={"query": "slow"},
+                )
+            )
+            await asyncio.wait_for(stream_started.wait(), timeout=1)
+            try:
+                deleted = await asyncio.wait_for(
+                    control.delete(
+                        "/admin/v1/accounts/account-a", headers=auth_headers()
+                    ),
+                    timeout=1,
+                )
+            finally:
+                release_stream.set()
+            streamed = await asyncio.wait_for(slow_request, timeout=1)
+
+        assert await service.state.get_affinity("search_id:deleted-stream") is None
+
+    assert deleted.status_code == 200
+    assert streamed.status_code == 200
+    assert streamed.json() == {"search_id": "deleted-stream"}
+
+
+@pytest.mark.asyncio
+async def test_account_delete_rolls_back_when_state_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    accounts_path = tmp_path / "accounts.json"
+    settings = make_settings(
+        multiple_accounts=True,
+        routing_mode="round_robin",
+        accounts_file_path=str(accounts_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    accounts_path.write_bytes(serialize_accounts(settings.accounts))
+    app = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+
+    async with LifespanManager(app):
+        service = app.state.proxy_service
+
+        async def fail_cleanup(_: set[str]) -> None:
+            raise RuntimeError("state cleanup fixture")
+
+        monkeypatch.setattr(service.state, "purge_accounts", fail_cleanup)
+        async with await app_client(app) as client:
+            response = await client.delete(
+                "/admin/v1/accounts/account-a", headers=auth_headers()
+            )
+            config = await client.get("/admin/v1/config", headers=auth_headers())
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "apply_failed"}
+    assert [item["id"] for item in config.json()["accounts"]] == [
+        "account-a",
+        "account-b",
+    ]
+    stored = json.loads(accounts_path.read_text(encoding="utf-8"))
+    assert [item["id"] for item in stored["accounts"]] == [
+        "account-a",
+        "account-b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_default_account_must_be_changed_before_delete(
+    tmp_path: Path,
+) -> None:
+    accounts_path = tmp_path / "accounts.json"
+    settings = make_settings(
+        multiple_accounts=True,
+        default_account="account-b",
+        accounts_file_path=str(accounts_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    accounts_path.write_bytes(serialize_accounts(settings.accounts))
+    app = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+
+    async with LifespanManager(app):
+        async with await app_client(app) as client:
+            config = await client.get("/admin/v1/config", headers=auth_headers())
+            response = await client.delete(
+                "/admin/v1/accounts/account-b", headers=auth_headers()
+            )
+
+    assert config.json()["routing"]["configured_default_account"] == "account-b"
+    assert response.status_code == 409
+    assert response.json() == {"detail": "default_account_locked"}
+    stored = json.loads(accounts_path.read_text(encoding="utf-8"))
+    assert [item["id"] for item in stored["accounts"]] == [
+        "account-a",
+        "account-b",
+    ]
 
 
 @pytest.mark.asyncio
