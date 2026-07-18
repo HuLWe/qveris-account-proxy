@@ -85,6 +85,14 @@ def test_multiple_accounts_use_a_dynamic_default_only_for_round_robin() -> None:
     assert settings_with_default.effective_default_account == "account-b"
 
 
+def test_first_open_browser_claim_is_opt_in() -> None:
+    assert make_settings().admin_first_open_claim_enabled is False
+    assert (
+        make_settings(admin_first_open_claim_enabled=True).admin_first_open_claim_enabled
+        is True
+    )
+
+
 def test_account_rate_limit_defaults_are_conservative_and_configurable() -> None:
     default_account = AccountConfig(
         id="default-rate",

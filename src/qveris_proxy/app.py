@@ -15,8 +15,11 @@ from pydantic import ValidationError
 from .admin import ADMIN_CONFIG_MAX_BYTES, AdminConfigError
 from .admin_ui import router as admin_ui_router
 from .bootstrap import (
+    ADMIN_BROWSER_SESSION_COOKIE,
+    ADMIN_BROWSER_SESSION_HEADER,
     BOOTSTRAP_EXCHANGE_MAX_BYTES,
     BOOTSTRAP_TICKET_TTL_SECONDS,
+    AdminBrowserSessions,
     AdminBootstrapTickets,
     BootstrapExchangeInput,
     BootstrapTicketCapacityError,
@@ -48,6 +51,9 @@ def create_app(
         resolved_settings = settings if settings is not None else load_settings()
         service = ProxyService(resolved_settings, transport=transport)
         application.state.admin_bootstrap_tickets.clear()
+        application.state.admin_browser_sessions = AdminBrowserSessions(
+            resolved_settings.proxy_access_token.get_secret_value()
+        )
         await service.start()
         application.state.proxy_service = service
         background_tasks: list[asyncio.Task[None]] = []
@@ -162,6 +168,64 @@ def create_app(
         return {
             "access_token": request.app.state.proxy_service.settings.proxy_access_token.get_secret_value()
         }
+
+    @application.post("/admin/v1/browser-session", include_in_schema=False)
+    async def create_admin_browser_session(
+        request: Request, response: Response
+    ) -> dict[str, str]:
+        service = request.app.state.proxy_service
+        service.authenticate(request)
+        return _issue_admin_browser_session(request, response)
+
+    @application.get("/admin/v1/browser-session", include_in_schema=False)
+    async def resume_admin_browser_session(
+        request: Request, response: Response
+    ) -> dict[str, str]:
+        _require_admin_browser_request(request)
+        sessions = request.app.state.admin_browser_sessions
+        candidate = request.cookies.get(ADMIN_BROWSER_SESSION_COOKIE, "")
+        if not sessions.validate(candidate):
+            raise HTTPException(
+                status_code=401,
+                detail="admin browser session invalid or expired",
+                headers=_BOOTSTRAP_NO_STORE_HEADERS,
+            )
+        return _issue_admin_browser_session(request, response)
+
+    @application.post("/admin/v1/browser-session/claim", include_in_schema=False)
+    async def claim_admin_browser_session(
+        request: Request, response: Response
+    ) -> dict[str, str]:
+        _require_admin_browser_request(request)
+        service = request.app.state.proxy_service
+        if not service.settings.admin_first_open_claim_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="first-open browser claim disabled",
+                headers=_BOOTSTRAP_NO_STORE_HEADERS,
+            )
+        sessions = request.app.state.admin_browser_sessions
+        if not await service.state.claim_admin_browser(sessions.claim_key):
+            raise HTTPException(
+                status_code=409,
+                detail="first-open browser claim already used",
+                headers=_BOOTSTRAP_NO_STORE_HEADERS,
+            )
+        return _issue_admin_browser_session(request, response)
+
+    @application.delete("/admin/v1/browser-session", include_in_schema=False)
+    async def clear_admin_browser_session(
+        request: Request, response: Response
+    ) -> dict[str, bool]:
+        response.headers.update(_BOOTSTRAP_NO_STORE_HEADERS)
+        response.delete_cookie(
+            ADMIN_BROWSER_SESSION_COOKIE,
+            path="/admin",
+            secure=request.url.scheme == "https",
+            httponly=True,
+            samesite="strict",
+        )
+        return {"disconnected": True}
 
     @application.get("/admin/v1/config", include_in_schema=False)
     async def admin_config(request: Request, response: Response) -> dict[str, object]:
@@ -377,6 +441,34 @@ def _raise_admin_config_error(code: str) -> None:
         "apply_and_rollback_failed": 500,
     }.get(code, 400)
     raise HTTPException(status_code=status_code, detail=code)
+
+
+def _require_admin_browser_request(request: Request) -> None:
+    if request.headers.get(ADMIN_BROWSER_SESSION_HEADER) != "1":
+        raise HTTPException(
+            status_code=400,
+            detail="invalid admin browser session request",
+            headers=_BOOTSTRAP_NO_STORE_HEADERS,
+        )
+
+
+def _issue_admin_browser_session(
+    request: Request, response: Response
+) -> dict[str, str]:
+    sessions = request.app.state.admin_browser_sessions
+    response.headers.update(_BOOTSTRAP_NO_STORE_HEADERS)
+    response.set_cookie(
+        ADMIN_BROWSER_SESSION_COOKIE,
+        sessions.issue(),
+        max_age=sessions.max_age_seconds,
+        path="/admin",
+        secure=request.url.scheme == "https",
+        httponly=True,
+        samesite="strict",
+    )
+    return {
+        "access_token": request.app.state.proxy_service.settings.proxy_access_token.get_secret_value()
+    }
 
 
 app = create_app()

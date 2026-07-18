@@ -193,6 +193,11 @@ def run_shell_quickstart_fixture(
 def test_launchers_include_the_same_first_run_contract() -> None:
     powershell = read_project_file("start.ps1")
     shell = read_project_file("start.sh")
+    compose = read_project_file("compose.yaml")
+    quickstart = read_project_file("compose.quickstart.yaml")
+
+    assert "QVP_ADMIN_FIRST_OPEN_CLAIM" in compose
+    assert 'QVP_ADMIN_FIRST_OPEN_CLAIM: "true"' in quickstart
 
     for launcher in (powershell, shell):
         assert REGISTRATION_URL in launcher
@@ -455,8 +460,9 @@ def test_documentation_and_ignore_rules_match_the_delivery_flow() -> None:
     assert "./start.sh" in readme
     assert ".\\start.cmd -Stop" in readme
     assert "./start.sh --stop" in readme
-    assert "显示、隐藏或复制代理 API Key" in readme
-    assert "sessionStorage" in readme
+    assert "显示、隐藏、分别复制" in readme
+    assert "HttpOnly" in readme
+    assert "不写入 localStorage" in readme
 
     ignored = set(gitignore.splitlines())
     assert "runtime/" in ignored

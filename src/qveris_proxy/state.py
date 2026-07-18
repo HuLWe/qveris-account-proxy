@@ -73,6 +73,11 @@ class StateStore:
                 success_at REAL,
                 attempt_valid INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS admin_browser_claims (
+                claim_key TEXT PRIMARY KEY,
+                claimed_at REAL NOT NULL
+            );
             """
         )
         cooldown_columns = {
@@ -114,6 +119,20 @@ class StateStore:
     @staticmethod
     def _hash_affinity(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    async def claim_admin_browser(self, claim_key: str) -> bool:
+        if len(claim_key) != 64 or any(
+            character not in "0123456789abcdef" for character in claim_key
+        ):
+            raise ValueError("invalid admin browser claim key")
+        async with self._lock:
+            cursor = self._connection.execute(
+                "INSERT OR IGNORE INTO admin_browser_claims(claim_key, claimed_at) "
+                "VALUES (?, ?)",
+                (claim_key, self._wall_time()),
+            )
+            self._connection.commit()
+            return cursor.rowcount == 1
 
     async def get_affinity(self, value: str) -> str | None:
         key = self._hash_affinity(value)

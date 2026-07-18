@@ -139,6 +139,7 @@ class ProxySettings(BaseModel):
     default_account: str | None = None
     routing_mode: Literal["explicit", "round_robin"] = "round_robin"
     allow_oauth_route_fallback: bool = False
+    admin_first_open_claim_enabled: bool = False
     state_path: str = "/data/state.db"
     affinity_ttl_seconds: float = Field(
         default=24 * 60 * 60, ge=60, le=30 * 24 * 60 * 60
@@ -288,6 +289,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> ProxySettings:
         "routing_mode": env.get("QVP_ROUTING_MODE", "round_robin"),
         "allow_oauth_route_fallback": _env_bool(
             env, "QVP_ALLOW_API_KEY_FOR_OAUTH_ROUTES", False
+        ),
+        "admin_first_open_claim_enabled": _env_bool(
+            env, "QVP_ADMIN_FIRST_OPEN_CLAIM", False
         ),
         "state_path": env.get("QVP_STATE_PATH", "/data/state.db"),
         "affinity_ttl_seconds": _env_float(

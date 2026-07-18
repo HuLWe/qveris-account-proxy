@@ -12,7 +12,12 @@ from asgi_lifespan import LifespanManager
 
 from qveris_proxy.admin import serialize_accounts
 from qveris_proxy.app import create_app
-from qveris_proxy.bootstrap import AdminBootstrapTickets
+from qveris_proxy.bootstrap import (
+    ADMIN_BROWSER_SESSION_COOKIE,
+    ADMIN_BROWSER_SESSION_HEADER,
+    AdminBrowserSessions,
+    AdminBootstrapTickets,
+)
 from qveris_proxy.routes import PUBLIC_OPERATIONS, QVERIS_API_VERSION
 from qveris_proxy.state import StoredCooldown
 from conftest import (
@@ -118,6 +123,10 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"localStorage" not in script.content
     assert b"window.sessionStorage.setItem" in script.content
     assert b"window.sessionStorage.removeItem" in script.content
+    assert b"claimFirstBrowserSession" in script.content
+    assert b"resumeBrowserSession" in script.content
+    assert b"rememberBrowserSession" in script.content
+    assert b"forgetBrowserSession" in script.content
     assert b"window.history.replaceState" in script.content
     assert b"window.location.hash" in script.content
     assert b'cleanUrl.searchParams.delete("launch")' in script.content
@@ -157,6 +166,119 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"button.danger:hover:not(:disabled)" in stylesheet.content
     assert b".onboarding-actions" in stylesheet.content
     assert calls == 0
+
+
+def test_admin_browser_session_is_signed_secret_free_and_expiring() -> None:
+    now = [1_700_000_000.0]
+    sessions = AdminBrowserSessions(
+        ACCESS_TOKEN,
+        max_age_seconds=60,
+        wall_time=lambda: now[0],
+    )
+    session = sessions.issue()
+
+    assert sessions.validate(session)
+    assert ACCESS_TOKEN not in session
+    assert re.fullmatch(r"[0-9a-f]{64}", sessions.claim_key)
+
+    replacement = "A" if session[-1] != "A" else "B"
+    assert not sessions.validate(f"{session[:-1]}{replacement}")
+    assert not AdminBrowserSessions(
+        f"{ACCESS_TOKEN}-rotated",
+        max_age_seconds=60,
+        wall_time=lambda: now[0],
+    ).validate(session)
+
+    now[0] += 60
+    assert not sessions.validate(session)
+
+
+@pytest.mark.asyncio
+async def test_first_open_browser_claim_is_atomic_and_persists_across_restart(
+    tmp_path: Path,
+) -> None:
+    state_path = str(tmp_path / "first-open.db")
+    settings = make_settings(
+        admin_first_open_claim_enabled=True,
+        state_path=state_path,
+    )
+    header = {ADMIN_BROWSER_SESSION_HEADER: "1"}
+    app = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+
+    async with LifespanManager(app):
+        async with await app_client(app) as first, await app_client(app) as second:
+            missing_header = await first.post("/admin/v1/browser-session/claim")
+            claimed, raced = await asyncio.gather(
+                first.post("/admin/v1/browser-session/claim", headers=header),
+                second.post("/admin/v1/browser-session/claim", headers=header),
+            )
+            winner = claimed if claimed.status_code == 200 else raced
+            session_cookie = winner.cookies.get(ADMIN_BROWSER_SESSION_COOKIE)
+
+    assert missing_header.status_code == 400
+    assert sorted((claimed.status_code, raced.status_code)) == [200, 409]
+    assert winner.json() == {"access_token": ACCESS_TOKEN}
+    assert session_cookie
+    assert ACCESS_TOKEN not in session_cookie
+    set_cookie = winner.headers["set-cookie"]
+    assert "HttpOnly" in set_cookie
+    assert "Max-Age=15552000" in set_cookie
+    assert "Path=/admin" in set_cookie
+    assert "SameSite=strict" in set_cookie
+    assert winner.headers["cache-control"] == "no-store"
+
+    restarted = create_app(
+        settings,
+        transport=httpx.MockTransport(lambda _: None),
+    )
+    async with LifespanManager(restarted):
+        async with await app_client(restarted) as client:
+            resumed = await client.get(
+                "/admin/v1/browser-session",
+                headers={
+                    **header,
+                    "Cookie": f"{ADMIN_BROWSER_SESSION_COOKIE}={session_cookie}",
+                },
+            )
+            reclaimed = await client.post(
+                "/admin/v1/browser-session/claim", headers=header
+            )
+
+    assert resumed.status_code == 200
+    assert resumed.json() == {"access_token": ACCESS_TOKEN}
+    assert reclaimed.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_authenticated_browser_session_can_resume_and_disconnect() -> None:
+    app = create_app(make_settings(), transport=httpx.MockTransport(lambda _: None))
+    header = {ADMIN_BROWSER_SESSION_HEADER: "1"}
+
+    async with LifespanManager(app):
+        async with await app_client(app) as client:
+            disabled_claim = await client.post(
+                "/admin/v1/browser-session/claim", headers=header
+            )
+            denied = await client.post("/admin/v1/browser-session")
+            remembered = await client.post(
+                "/admin/v1/browser-session", headers=auth_headers()
+            )
+            resumed = await client.get(
+                "/admin/v1/browser-session", headers=header
+            )
+            disconnected = await client.delete("/admin/v1/browser-session")
+            expired = await client.get(
+                "/admin/v1/browser-session", headers=header
+            )
+
+    assert disabled_claim.status_code == 403
+    assert denied.status_code == 401
+    assert remembered.status_code == 200
+    assert resumed.status_code == 200
+    assert resumed.json() == {"access_token": ACCESS_TOKEN}
+    assert disconnected.status_code == 200
+    assert disconnected.json() == {"disconnected": True}
+    assert expired.status_code == 401
 
 
 @pytest.mark.asyncio

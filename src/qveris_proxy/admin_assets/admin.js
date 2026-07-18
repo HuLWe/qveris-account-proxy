@@ -2,6 +2,7 @@
 
 const SESSION_TOKEN_KEY = "qveris-proxy.admin-token.v1";
 const BOOTSTRAP_TICKET_FRAGMENT_KEY = "bootstrap_ticket";
+const ADMIN_BROWSER_SESSION_HEADER = "X-QVeris-Admin-Session";
 
 const state = {
   token: "",
@@ -172,11 +173,18 @@ async function exchangeBootstrapTicket(ticket) {
     credentials: "omit",
     redirect: "error",
   });
+  return accessTokenFromResponse(response);
+}
+
+async function accessTokenFromResponse(response, emptyStatuses = []) {
   let payload = null;
   try {
     payload = await response.json();
   } catch {
     payload = null;
+  }
+  if (emptyStatuses.includes(response.status)) {
+    return "";
   }
   if (
     !response.ok ||
@@ -187,6 +195,50 @@ async function exchangeBootstrapTicket(ticket) {
     throw new Error("自动连接链接已失效，请重新运行启动脚本");
   }
   return payload.access_token;
+}
+
+async function rememberBrowserSession() {
+  const response = await fetch("/admin/v1/browser-session", {
+    method: "POST",
+    headers: authHeaders(),
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+  });
+  await accessTokenFromResponse(response);
+}
+
+async function resumeBrowserSession() {
+  const response = await fetch("/admin/v1/browser-session", {
+    headers: { [ADMIN_BROWSER_SESSION_HEADER]: "1" },
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+  });
+  return accessTokenFromResponse(response, [401]);
+}
+
+async function claimFirstBrowserSession() {
+  const response = await fetch("/admin/v1/browser-session/claim", {
+    method: "POST",
+    headers: { [ADMIN_BROWSER_SESSION_HEADER]: "1" },
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+  });
+  return accessTokenFromResponse(response, [403, 409]);
+}
+
+async function forgetBrowserSession() {
+  const response = await fetch("/admin/v1/browser-session", {
+    method: "DELETE",
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
 }
 
 function node(tag, options = {}) {
@@ -283,6 +335,11 @@ async function connect(token) {
     state.config = config;
     state.draft = structuredClone(config);
     state.operations = catalog.operations;
+    try {
+      await rememberBrowserSession();
+    } catch {
+      // The current tab remains connected when persistent browser storage is blocked.
+    }
     markPersistedAccounts();
     byId("api-version").textContent = `API ${catalog.api_version}`;
     byId("locked-state").hidden = true;
@@ -319,11 +376,16 @@ function resetWorkspace() {
   setApiKeyVisibility(false);
 }
 
-function disconnect() {
+async function disconnect() {
   clearSessionToken();
   state.token = "";
   resetWorkspace();
   setGateway("idle", "未连接");
+  try {
+    await forgetBrowserSession();
+  } catch {
+    showToast("当前页面已断开，浏览器自动连接记录清除失败", true);
+  }
 }
 
 async function bootstrap() {
@@ -340,6 +402,17 @@ async function bootstrap() {
     }
   }
   token ||= readSessionToken();
+  if (!token) {
+    try {
+      token = await resumeBrowserSession();
+      token ||= await claimFirstBrowserSession();
+    } catch (error) {
+      resetWorkspace();
+      setGateway("error", "自动连接失败");
+      showToast(error.message, true);
+      return;
+    }
+  }
   if (token) {
     await connect(token);
   }

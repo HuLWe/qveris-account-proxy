@@ -1,5 +1,7 @@
 services:
   proxy:
+    environment:
+      QVP_ADMIN_FIRST_OPEN_CLAIM: "true"
     volumes:
       - type: volume
         source: qveris_config
