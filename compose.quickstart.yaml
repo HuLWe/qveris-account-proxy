@@ -1,0 +1,25 @@
+services:
+  proxy:
+    volumes:
+      - type: volume
+        source: qveris_config
+        target: /config
+      - type: volume
+        source: qveris_secrets
+        target: /run/secrets
+        read_only: true
+      - type: volume
+        source: qveris_account_secrets
+        target: /run/account-secrets
+        read_only: true
+
+volumes:
+  qveris_config:
+    labels:
+      io.github.hulwe.qveris.quickstart: "1"
+  qveris_secrets:
+    labels:
+      io.github.hulwe.qveris.quickstart: "1"
+  qveris_account_secrets:
+    labels:
+      io.github.hulwe.qveris.quickstart: "1"

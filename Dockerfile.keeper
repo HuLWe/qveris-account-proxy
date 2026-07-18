@@ -1,0 +1,45 @@
+FROM python:3.13-slim AS builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /build
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+COPY keeper-requirements.lock ./
+RUN python -m pip install --require-hashes --no-deps -r keeper-requirements.lock
+
+FROM python:3.13-slim AS runtime
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONPATH="/app/src" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    HOME=/home/keeper \
+    XDG_CACHE_HOME=/tmp/.cache \
+    XDG_CONFIG_HOME=/tmp/.config \
+    TMPDIR=/tmp
+
+COPY --from=builder /opt/venv /opt/venv
+
+RUN python -m playwright install --with-deps chromium \
+    && groupadd --system --gid 10001 keeper \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /home/keeper \
+        --shell /usr/sbin/nologin keeper \
+    && mkdir -p /app/src /data /profiles /home/keeper \
+    && chown -R 10001:10001 /app /data /profiles /home/keeper \
+    && chmod -R a+rX /ms-playwright
+
+COPY --chown=10001:10001 src /app/src
+COPY --chown=10001:10001 LICENSE /app/LICENSE
+
+USER 10001:10001
+EXPOSE 8081
+VOLUME ["/profiles", "/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health/live', timeout=3).read()"]
+
+CMD ["uvicorn", "qveris_keeper.app:app", "--host", "0.0.0.0", "--port", "8081", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]

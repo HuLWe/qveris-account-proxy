@@ -1,0 +1,9 @@
+services:
+  proxy:
+    environment:
+      QVP_ACCOUNTS_FILE: /config/accounts.json
+      QVP_CONFIG_WRITE_ENABLED: "true"
+    volumes:
+      - type: bind
+        source: "${QVP_CONFIG_DIR:?Set QVP_CONFIG_DIR to the writable configuration directory}"
+        target: /config

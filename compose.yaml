@@ -1,0 +1,66 @@
+name: qveris-proxy
+
+services:
+  proxy:
+    build:
+      context: .
+    image: qveris-account-proxy:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${QVP_BIND_ADDRESS:-127.0.0.1}:${QVP_HOST_PORT:-18081}:8080"
+    environment:
+      QVP_ACCOUNTS_FILE: /run/secrets/accounts.json
+      QVP_ACCESS_TOKEN_FILE: /run/secrets/proxy_access_token
+      QVP_DEFAULT_ACCOUNT: "${QVP_DEFAULT_ACCOUNT:-}"
+      QVP_ROUTING_MODE: "${QVP_ROUTING_MODE:-round_robin}"
+      QVP_ALLOW_API_KEY_FOR_OAUTH_ROUTES: "${QVP_ALLOW_API_KEY_FOR_OAUTH_ROUTES:-false}"
+      QVP_STATE_PATH: /data/state.db
+      QVP_AFFINITY_TTL_SECONDS: "${QVP_AFFINITY_TTL_SECONDS:-86400}"
+      QVP_AFFINITY_CAPTURE_BYTES: "${QVP_AFFINITY_CAPTURE_BYTES:-2097152}"
+      QVP_QUOTA_REFRESH_INTERVAL_SECONDS: "${QVP_QUOTA_REFRESH_INTERVAL_SECONDS:-900}"
+      QVP_ACCOUNTS_RELOAD_INTERVAL_SECONDS: "${QVP_ACCOUNTS_RELOAD_INTERVAL_SECONDS:-30}"
+      QVP_CONFIG_WRITE_ENABLED: "${QVP_CONFIG_WRITE_ENABLED:-false}"
+      QVP_MAX_CONNECTIONS: "${QVP_MAX_CONNECTIONS:-64}"
+      QVP_MAX_INFLIGHT_PER_KEY: "${QVP_MAX_INFLIGHT_PER_KEY:-8}"
+      QVP_MAX_REQUEST_BODY_BYTES: "${QVP_MAX_REQUEST_BODY_BYTES:-4194304}"
+      QVP_QUEUE_TIMEOUT_SECONDS: "${QVP_QUEUE_TIMEOUT_SECONDS:-2}"
+      QVP_CONNECT_TIMEOUT_SECONDS: "${QVP_CONNECT_TIMEOUT_SECONDS:-10}"
+      QVP_READ_TIMEOUT_SECONDS: "${QVP_READ_TIMEOUT_SECONDS:-120}"
+      QVP_WRITE_TIMEOUT_SECONDS: "${QVP_WRITE_TIMEOUT_SECONDS:-30}"
+      QVP_POOL_TIMEOUT_SECONDS: "${QVP_POOL_TIMEOUT_SECONDS:-5}"
+      QVP_MAX_RATE_LIMIT_COOLDOWN_SECONDS: "${QVP_MAX_RATE_LIMIT_COOLDOWN_SECONDS:-300}"
+      QVP_AUTH_FAILURE_COOLDOWN_SECONDS: "${QVP_AUTH_FAILURE_COOLDOWN_SECONDS:-300}"
+      QVP_FORBIDDEN_COOLDOWN_SECONDS: "${QVP_FORBIDDEN_COOLDOWN_SECONDS:-3600}"
+      QVP_FAILURE_BACKOFF_BASE_SECONDS: "${QVP_FAILURE_BACKOFF_BASE_SECONDS:-2}"
+      QVP_FAILURE_BACKOFF_MAX_SECONDS: "${QVP_FAILURE_BACKOFF_MAX_SECONDS:-300}"
+      QVP_PAYMENT_REQUIRED_COOLDOWN_SECONDS: "${QVP_PAYMENT_REQUIRED_COOLDOWN_SECONDS:-3600}"
+    volumes:
+      - qveris_state:/data
+      - type: bind
+        source: "${QVP_SECRET_DIR:?Set QVP_SECRET_DIR to the external secret directory}"
+        target: /run/secrets
+        read_only: true
+      - type: bind
+        source: "${QVP_ACCOUNT_SECRETS_DIR:?Set QVP_ACCOUNT_SECRETS_DIR}"
+        target: /run/account-secrets
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: "${QVP_MEMORY_LIMIT:-256m}"
+    cpus: "${QVP_CPU_LIMIT:-1.0}"
+    pids_limit: "${QVP_PIDS_LIMIT:-128}"
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  qveris_state:
