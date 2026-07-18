@@ -66,7 +66,7 @@ bash ./start.sh --lan
 
 在管理页的“账号配置”中先点击“测试”验证首个账号，再点击“添加账号”，逐个录入其他 QVeris API key 并保存。登录 QVeris 网站本身不会自动把账号加入代理池；只有在这里添加并保存的账号才参与路由。所有已保存账号共用同一个代理 API Key，搜索、工具发现和执行请求会在可用账号间按权重轮询，同一 session/search/execution 会保持账号亲和。各账号额度仍分别记录和显示，不会合并成一个总余额。
 
-每个账号都有独立连接池和可保存的稳定连接标识。点击“重新生成”会为该账号生成一次新的 User-Agent 标识和语言组合，保存后保持固定；轻量 API 模式不包含 Canvas、WebGL 或 TLS 浏览器指纹。运行状态表和账号配置卡片都提供“删除”按钮，确认后立即删除该代理账号及其已保存凭据，最后一个账号会被保留。
+每个账号都有独立连接池和可保存的稳定连接标识。点击“重新生成”会为该账号生成一次新的 User-Agent 标识和语言组合，保存后保持固定；轻量 API 模式不包含 Canvas、WebGL 或 TLS 浏览器指纹。运行状态表提供“编辑”和“删除”按钮，“编辑”会直接定位到对应账号配置，“删除”确认后立即删除该代理账号及其已保存凭据。最后一个账号仍会保留，先添加并保存替代账号后即可删除原账号。
 
 打开 Vibe-Trading 设置页（例如 http://127.0.0.1:8899/settings），在管理页“接入应用”区域复制代理 API Key，填入这两个字段：
 
@@ -76,6 +76,16 @@ API Key:  管理页中的代理 API Key
 ~~~
 
 不要把上游 QVeris API key 填进 Vibe。若 Vibe 在另一台局域网主机，使用 -Lan / --lan 启动代理，再使用脚本打印的局域网 API Base URL。若脚本显示 LAN_IP，请把它换成运行代理电脑的 IPv4 地址，或先设置 QVP_LAN_HOST。
+
+### 交给 Agent 安装
+
+把下面整段发给能操作本机终端的 Agent；Agent 只负责下载、启动和验证，首个上游 API key 由用户在终端的隐藏输入框中自行填写：
+
+~~~text
+从 https://github.com/HuLWe/qveris-account-proxy 安装 main 分支最新版 QVeris Account Proxy。先确认操作系统、安装目录、仅本机或局域网模式、18081 端口、Docker Engine 与 Docker Compose v2；若已有同名 qveris-proxy 项目，先让我选择复用原数据卷或使用新的 QVP_PROJECT_NAME。不要安装额外的 Python 环境，不要读取、记录或回显任何 API key、启动票据或令牌命令输出。Windows 使用 .\start.cmd，局域网共享时使用 .\start.cmd -Lan；macOS/Linux 使用 bash ./start.sh，局域网共享时加 --lan。脚本需要首个 QVeris API key 时暂停，让我直接在终端隐藏输入。启动后验证容器 healthy、/health/ready 返回 200，并只用 HTTP 检查 /admin/assets/admin.js；不要用 Agent 浏览器打开 /admin/，首次连接由我的浏览器完成。保留当前 Compose 项目的全部 named volumes（卷名通常带项目名前缀），只报告管理页地址和 API Base URL。
+~~~
+
+没有 Git 时可让 Agent 下载 `https://github.com/HuLWe/qveris-account-proxy/archive/refs/heads/main.zip`，解压后执行同一启动脚本。
 
 ### 数据会不会丢
 

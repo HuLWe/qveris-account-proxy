@@ -136,8 +136,10 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"innerHTML" not in script.content
     assert b"eval(" not in script.content
     assert b"https://qveris.ai/?ref=afAfj_c90cnWYg" in shell.content
+    assert shell.content.count(b"https://qveris.ai/?ref=afAfj_c90cnWYg") == 2
     assert b"75gxF1vtvXWj_A" in shell.content
     assert b'rel="noopener noreferrer"' in shell.content
+    assert b'id="register-account"' in shell.content
     assert b'class="onboarding-actions"' in shell.content
     assert b'id="copy-api-key"' in shell.content
     assert b'id="api-key-display"' in shell.content
@@ -159,12 +161,21 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"Promise.allSettled" in script.content
     assert b"deletingAccountId" in script.content
     assert b"account.persisted && account.id === accountId" in script.content
+    assert b"function editAccount" in script.content
+    assert b'activateTab("config")' in script.content
+    assert b"editButton.dataset.accountEdit" in script.content
+    assert b"actionGroup.append(testButton, editButton, deleteButton)" in script.content
+    assert b"deleteButton.disabled = deleteInProgress" in script.content
+    assert b"remove.disabled = deleteInProgress" in script.content
+    assert "请先添加并保存另一个账号".encode() in script.content
     assert "稳定连接标识".encode() in script.content
     assert b"[hidden]" in stylesheet.content
     assert b"display: none !important" in stylesheet.content
     assert b".manual-connect:not([open]) > .manual-auth" in stylesheet.content
     assert b"button.danger:hover:not(:disabled)" in stylesheet.content
     assert b".onboarding-actions" in stylesheet.content
+    assert b".registration-link-secondary" in stylesheet.content
+    assert b".account-editor.edit-target" in stylesheet.content
     assert calls == 0
 
 

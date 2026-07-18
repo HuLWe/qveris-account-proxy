@@ -429,6 +429,45 @@ function renderAll() {
   renderConsole();
 }
 
+function activateTab(tabName) {
+  for (const candidate of document.querySelectorAll(".tab")) {
+    candidate.classList.toggle("active", candidate.dataset.tab === tabName);
+  }
+  for (const panel of document.querySelectorAll(".panel")) {
+    panel.classList.toggle("active", panel.dataset.panel === tabName);
+  }
+}
+
+function editAccount(accountId) {
+  if (!state.draft || !Array.isArray(state.draft.accounts)) {
+    showToast("账号配置尚未加载，请刷新后重试", true);
+    return;
+  }
+  const accountIndex = state.draft.accounts.findIndex(
+    (account) => account.id === accountId,
+  );
+  if (accountIndex < 0) {
+    showToast(`账号 ${accountId} 已不存在，请刷新状态`, true);
+    return;
+  }
+
+  activateTab("config");
+  const editor = byId("account-editors").children[accountIndex];
+  if (!editor) {
+    showToast("账号编辑器尚未就绪，请刷新后重试", true);
+    return;
+  }
+  editor.scrollIntoView({ block: "start" });
+  editor.classList.add("edit-target");
+  const firstEditable = editor.querySelector(
+    "input:not([readonly]):not([disabled])",
+  );
+  if (firstEditable) {
+    firstEditable.focus();
+  }
+  window.setTimeout(() => editor.classList.remove("edit-target"), 1600);
+}
+
 function appendMetric(container, label, value) {
   const metric = node("div", { className: "metric" });
   metric.append(node("span", { text: label }), node("strong", { text: value }));
@@ -549,6 +588,9 @@ function renderStatus() {
 
     const action = node("td", { className: "command-column" });
     const actionGroup = node("div", { className: "row-actions" });
+    const writable = Boolean(
+      state.config && state.config.capabilities.persistent_editing,
+    );
     const testButton = node("button", {
       className: "secondary",
       text: state.tests.get(account.id) || "测试",
@@ -556,14 +598,30 @@ function renderStatus() {
     });
     testButton.setAttribute("aria-label", `测试账号 ${account.id}`);
     testButton.addEventListener("click", () => testAccount(account.id, testButton));
+    const editButton = node("button", {
+      className: "secondary",
+      text: "编辑",
+      type: "button",
+    });
+    editButton.dataset.accountEdit = account.id;
+    editButton.disabled = Boolean(state.deletingAccountId);
+    editButton.title = writable ? "编辑已保存的账号配置" : "持久编辑未启用";
+    editButton.setAttribute(
+      "aria-label",
+      writable ? `编辑账号 ${account.id}` : `${account.id}：持久编辑未启用`,
+    );
+    editButton.addEventListener("click", () => {
+      if (!writable) {
+        showToast("持久编辑未启用", true);
+        return;
+      }
+      editAccount(account.id);
+    });
     const deleteButton = node("button", {
       className: "danger",
       text: "删除",
       type: "button",
     });
-    const writable = Boolean(
-      state.config && state.config.capabilities.persistent_editing,
-    );
     deleteButton.dataset.accountDelete = "true";
     const deleteInProgress = Boolean(state.deletingAccountId);
     const explicitDefault = Boolean(
@@ -574,31 +632,29 @@ function renderStatus() {
     const deleteBlockedReason = !writable
       ? "持久编辑未启用"
       : accounts.length <= 1
-        ? "至少保留一个账号"
+        ? "请先添加并保存另一个账号，再删除此账号"
         : explicitDefault
           ? "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT"
           : "删除账号及已保存凭据";
-    deleteButton.disabled =
-      deleteInProgress || deleteBlockedReason !== "删除账号及已保存凭据";
+    deleteButton.disabled = deleteInProgress;
     deleteButton.title = deleteBlockedReason;
-    deleteButton.textContent = !writable
-      ? "只读"
-      : accounts.length <= 1
-        ? "保留"
-        : explicitDefault
-          ? "默认账号"
-          : state.deletingAccountId === account.id
-            ? "删除中"
-            : "删除";
+    deleteButton.textContent = state.deletingAccountId === account.id
+      ? "删除中"
+      : "删除";
     deleteButton.setAttribute(
       "aria-label",
-      deleteButton.disabled && !deleteInProgress
-        ? `${account.id}：${deleteButton.title}`
+      deleteBlockedReason !== "删除账号及已保存凭据"
+        ? `删除账号 ${account.id}（${deleteButton.title}）`
         : `删除账号 ${account.id}`,
     );
-    deleteButton.addEventListener("click", () =>
-      deleteAccount(account.id, deleteButton));
-    actionGroup.append(testButton, deleteButton);
+    deleteButton.addEventListener("click", () => {
+      if (deleteBlockedReason !== "删除账号及已保存凭据") {
+        showToast(deleteBlockedReason, true);
+        return;
+      }
+      deleteAccount(account.id, deleteButton);
+    });
+    actionGroup.append(testButton, editButton, deleteButton);
     action.append(actionGroup);
 
     row.append(identity, credentials, quota, rate, cooldown, network, action);
@@ -680,6 +736,7 @@ function renderConfig() {
 
 function renderAccountEditor(account, accountIndex) {
   const editor = node("section", { className: "account-editor" });
+  editor.dataset.accountId = account.id;
   const header = node("div", { className: "account-editor-header" });
   header.append(node("strong", { text: account.id || "新账号" }));
   const remove = node("button", {
@@ -698,31 +755,27 @@ function renderAccountEditor(account, accountIndex) {
   const deleteBlockedReason = !writable
     ? "持久编辑未启用"
     : account.persisted && state.config.accounts.length <= 1
-      ? "至少保留一个账号"
+      ? "请先添加并保存另一个账号，再删除此账号"
       : explicitDefault
         ? "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT"
         : "删除账号及已保存凭据";
-  remove.disabled = account.persisted
-    ? deleteInProgress || deleteBlockedReason !== "删除账号及已保存凭据"
-    : deleteInProgress;
+  remove.disabled = deleteInProgress;
   remove.title = deleteBlockedReason;
-  remove.textContent = account.persisted && !writable
-    ? "只读"
-    : account.persisted && state.config.accounts.length <= 1
-      ? "保留账号"
-      : explicitDefault
-        ? "默认账号"
-        : state.deletingAccountId === account.id
-          ? "删除中"
-          : "删除账号";
+  remove.textContent = state.deletingAccountId === account.id
+    ? "删除中"
+    : "删除账号";
   remove.setAttribute(
     "aria-label",
-    remove.disabled && !deleteInProgress
-      ? `${account.id || "新账号"}：${remove.title}`
+    account.persisted && deleteBlockedReason !== "删除账号及已保存凭据"
+      ? `删除账号 ${account.id}（${remove.title}）`
       : `删除账号 ${account.id || "新账号"}`,
   );
   remove.addEventListener("click", () => {
     if (account.persisted) {
+      if (deleteBlockedReason !== "删除账号及已保存凭据") {
+        showToast(deleteBlockedReason, true);
+        return;
+      }
       deleteAccount(account.id, remove);
       return;
     }
@@ -1081,7 +1134,7 @@ async function deleteAccount(accountId, button) {
     return;
   }
   if (!state.config || state.config.accounts.length <= 1) {
-    showToast("至少保留一个账号", true);
+    showToast("请先添加并保存另一个账号，再删除此账号", true);
     return;
   }
   if (state.config.routing?.configured_default_account === accountId) {
@@ -1376,12 +1429,7 @@ byId("clear-response").addEventListener("click", () => {
 
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => {
-    for (const candidate of document.querySelectorAll(".tab")) {
-      candidate.classList.toggle("active", candidate === tab);
-    }
-    for (const panel of document.querySelectorAll(".panel")) {
-      panel.classList.toggle("active", panel.dataset.panel === tab.dataset.tab);
-    }
+    activateTab(tab.dataset.tab);
   });
 }
 

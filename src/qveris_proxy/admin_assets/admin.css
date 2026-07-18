@@ -333,6 +333,17 @@ main {
   outline-offset: 1px;
 }
 
+.registration-link-secondary {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.registration-link-secondary:hover {
+  border-color: #7d8982;
+  background: #eef1ee;
+}
+
 .invite-code {
   color: var(--muted);
   font-size: 13px;
@@ -464,6 +475,7 @@ main {
 .connection-key-actions,
 .row-actions {
   display: flex;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 6px;
 }
@@ -571,7 +583,7 @@ td span {
 }
 
 .command-column {
-  width: 172px;
+  width: 244px;
   text-align: right;
 }
 
@@ -589,6 +601,11 @@ td.command-column button {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface);
+}
+
+.account-editor.edit-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus);
 }
 
 .account-editor-header {
@@ -866,6 +883,11 @@ pre {
 
   .actions button {
     flex: 1;
+  }
+
+  .actions .registration-link {
+    flex: 1;
+    justify-content: center;
   }
 
   .connection-band-heading {
