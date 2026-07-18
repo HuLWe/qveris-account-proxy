@@ -450,20 +450,50 @@ function activateTab(tabName) {
   }
 }
 
-function editAccount(accountId) {
+function accountManagementMessage(code) {
+  return {
+    persistent_editing_disabled: "持久编辑未启用",
+    accounts_file_unavailable: "账号配置文件不可写",
+    last_account_required: "请先添加并保存另一个账号，再删除此账号",
+    default_account_locked: "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT",
+  }[code] || code || "当前账号不可管理";
+}
+
+function managementForAccount(accountId) {
+  const accounts = state.status && Array.isArray(state.status.accounts)
+    ? state.status.accounts
+    : [];
+  return accounts.find((account) => account.id === accountId)?.management || null;
+}
+
+async function editAccount(accountId) {
   if (!state.draft || !Array.isArray(state.draft.accounts)) {
     showToast("账号配置尚未加载，请刷新后重试", true);
     return;
   }
-  const accountIndex = state.draft.accounts.findIndex(
+  let accountIndex = state.draft.accounts.findIndex(
     (account) => account.id === accountId,
   );
+  if (accountIndex < 0) {
+    try {
+      const config = await requestJson("/admin/v1/config");
+      state.config = config;
+      mergeDraftWithConfig(config);
+      accountIndex = state.draft.accounts.findIndex(
+        (account) => account.id === accountId,
+      );
+    } catch (error) {
+      showToast(error.message, true);
+      return;
+    }
+  }
   if (accountIndex < 0) {
     showToast(`账号 ${accountId} 已不存在，请刷新状态`, true);
     return;
   }
 
   activateTab("config");
+  renderConfig();
   const editor = byId("account-editors").children[accountIndex];
   if (!editor) {
     showToast("账号编辑器尚未就绪，请刷新后重试", true);
@@ -535,8 +565,8 @@ function renderStatus() {
     const row = node("tr");
     const identity = node("td");
     identity.append(
-      node("strong", { text: account.id }),
-      node("span", { text: `权重 ${account.weight}` }),
+      node("strong", { text: account.name || account.id }),
+      node("span", { text: `ID ${account.id} · 权重 ${account.weight}` }),
     );
 
     const credentials = node("td");
@@ -603,6 +633,15 @@ function renderStatus() {
     const writable = Boolean(
       state.config && state.config.capabilities.persistent_editing,
     );
+    const management = account.management || {};
+    const canEdit = typeof management.can_edit === "boolean"
+      ? management.can_edit
+      : writable;
+    const editReason = canEdit
+      ? null
+      : accountManagementMessage(
+        management.edit_reason || "persistent_editing_disabled",
+      );
     const testButton = node("button", {
       className: "secondary",
       text: state.tests.get(account.id) || "测试",
@@ -617,17 +656,17 @@ function renderStatus() {
     });
     editButton.dataset.accountEdit = account.id;
     editButton.disabled = Boolean(state.deletingAccountId);
-    editButton.title = writable ? "编辑已保存的账号配置" : "持久编辑未启用";
+    editButton.title = canEdit ? "编辑已保存的账号配置" : editReason;
     editButton.setAttribute(
       "aria-label",
-      writable ? `编辑账号 ${account.id}` : `${account.id}：持久编辑未启用`,
+      canEdit ? `编辑账号 ${account.id}` : `${account.id}：${editReason}`,
     );
     editButton.addEventListener("click", () => {
-      if (!writable) {
-        showToast("持久编辑未启用", true);
+      if (!canEdit) {
+        showToast(editReason, true);
         return;
       }
-      editAccount(account.id);
+      void editAccount(account.id);
     });
     const deleteButton = node("button", {
       className: "danger",
@@ -636,31 +675,32 @@ function renderStatus() {
     });
     deleteButton.dataset.accountDelete = "true";
     const deleteInProgress = Boolean(state.deletingAccountId);
-    const explicitDefault = Boolean(
-      state.config &&
-      state.config.routing &&
-      state.config.routing.configured_default_account === account.id,
-    );
-    const deleteBlockedReason = !writable
-      ? "持久编辑未启用"
+    const fallbackDeleteReason = !writable
+      ? "persistent_editing_disabled"
       : accounts.length <= 1
-        ? "请先添加并保存另一个账号，再删除此账号"
-        : explicitDefault
-          ? "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT"
-          : "删除账号及已保存凭据";
+        ? "last_account_required"
+        : state.config?.routing?.configured_default_account === account.id
+          ? "default_account_locked"
+          : null;
+    const canDelete = typeof management.can_delete === "boolean"
+      ? management.can_delete
+      : fallbackDeleteReason === null;
+    const deleteBlockedReason = canDelete
+      ? null
+      : accountManagementMessage(management.delete_reason || fallbackDeleteReason);
     deleteButton.disabled = deleteInProgress;
-    deleteButton.title = deleteBlockedReason;
+    deleteButton.title = deleteBlockedReason || "删除账号及已保存凭据";
     deleteButton.textContent = state.deletingAccountId === account.id
       ? "删除中"
       : "删除";
     deleteButton.setAttribute(
       "aria-label",
-      deleteBlockedReason !== "删除账号及已保存凭据"
-        ? `删除账号 ${account.id}（${deleteButton.title}）`
-        : `删除账号 ${account.id}`,
+      canDelete
+        ? `删除账号 ${account.id}`
+        : `删除账号 ${account.id}（${deleteButton.title}）`,
     );
     deleteButton.addEventListener("click", () => {
-      if (deleteBlockedReason !== "删除账号及已保存凭据") {
+      if (!canDelete) {
         showToast(deleteBlockedReason, true);
         return;
       }
@@ -797,7 +837,9 @@ function renderProxyKeys() {
     edit.disabled = busy;
     reset.disabled = busy;
     remove.disabled = busy || key.kind === "primary";
-    remove.title = key.kind === "primary" ? "主 Key 保留用于兼容现有接入" : "删除代理 Key";
+    remove.title = key.kind === "primary"
+      ? "默认代理 Key 为系统保留，不可删除"
+      : "删除代理 Key";
     edit.setAttribute("aria-label", `编辑代理 Key ${key.name || key.id}`);
     reset.setAttribute("aria-label", `重置代理 Key ${key.name || key.id} 的用量`);
     remove.setAttribute("aria-label", `删除代理 Key ${key.name || key.id}`);
@@ -886,7 +928,7 @@ function proxyKeyPayload() {
 function proxyKeyErrorMessage(code) {
   return {
     proxy_access_key_not_found: "代理 Key 已不存在，请刷新列表",
-    primary_proxy_access_key_required: "主 Key 需要保留",
+    primary_proxy_access_key_required: "默认代理 Key 为系统保留，不可删除",
     empty_proxy_access_key_update: "没有需要保存的修改",
     invalid_proxy_access_key: "代理 Key 配置无效，请检查限制值",
   }[code] || code;
@@ -999,7 +1041,7 @@ async function resetProxyKeyUsage(key) {
 
 async function deleteProxyKey(key) {
   if (key.kind === "primary") {
-    showToast("主 Key 需要保留", true);
+    showToast("默认代理 Key 为系统保留，不可删除", true);
     return;
   }
   if (!window.confirm(`确认删除代理 Key“${key.name || key.id}”？`)) {
@@ -1075,6 +1117,9 @@ function makeInput(type, value, onInput, options = {}) {
   if (options.step !== undefined) {
     input.step = String(options.step);
   }
+  if (options.maxLength !== undefined) {
+    input.maxLength = Number(options.maxLength);
+  }
   input.addEventListener("input", () => onInput(input.value));
   return input;
 }
@@ -1098,6 +1143,18 @@ function createConnectionProfile() {
     user_agent: `qveris-account-proxy/0.1.0 profile/${profileId}`,
     accept_language: CONNECTION_LANGUAGES[bytes[0] % CONNECTION_LANGUAGES.length],
   };
+}
+
+function nextAccountIdentity() {
+  const accounts = state.draft && Array.isArray(state.draft.accounts)
+    ? state.draft.accounts
+    : [];
+  const ids = new Set(accounts.map((account) => account.id));
+  let index = 1;
+  while (ids.has(`account-${index}`)) {
+    index += 1;
+  }
+  return { id: `account-${index}`, name: `账号 ${accounts.length + 1}` };
 }
 
 function connectionProfileLabel(userAgent) {
@@ -1129,7 +1186,10 @@ function renderAccountEditor(account, accountIndex) {
   const editor = node("section", { className: "account-editor" });
   editor.dataset.accountId = account.id;
   const header = node("div", { className: "account-editor-header" });
-  header.append(node("strong", { text: account.id || "新账号" }));
+  const accountHeading = node("strong", {
+    text: account.name || account.id || "新账号",
+  });
+  header.append(accountHeading);
   const remove = node("button", {
     className: "danger",
     text: "删除账号",
@@ -1138,32 +1198,36 @@ function renderAccountEditor(account, accountIndex) {
   const writable = Boolean(state.config.capabilities.persistent_editing);
   remove.dataset.accountDelete = "true";
   const deleteInProgress = Boolean(state.deletingAccountId);
-  const explicitDefault = Boolean(
-    account.persisted &&
-    state.config.routing &&
-    state.config.routing.configured_default_account === account.id,
-  );
-  const deleteBlockedReason = !writable
-    ? "持久编辑未启用"
+  const management = account.persisted ? managementForAccount(account.id) : null;
+  const fallbackDeleteReason = !writable
+    ? "persistent_editing_disabled"
     : account.persisted && state.config.accounts.length <= 1
-      ? "请先添加并保存另一个账号，再删除此账号"
-      : explicitDefault
-        ? "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT"
-        : "删除账号及已保存凭据";
+      ? "last_account_required"
+      : state.config.routing?.configured_default_account === account.id
+        ? "default_account_locked"
+        : null;
+  const canDelete = !account.persisted || (management
+    ? management.can_delete
+    : fallbackDeleteReason === null);
+  const deleteBlockedReason = canDelete
+    ? null
+    : accountManagementMessage(management?.delete_reason || fallbackDeleteReason);
   remove.disabled = deleteInProgress;
-  remove.title = deleteBlockedReason;
+  remove.title = deleteBlockedReason || (account.persisted
+    ? "删除账号及已保存凭据"
+    : "删除未保存账号");
   remove.textContent = state.deletingAccountId === account.id
     ? "删除中"
     : "删除账号";
   remove.setAttribute(
     "aria-label",
-    account.persisted && deleteBlockedReason !== "删除账号及已保存凭据"
-      ? `删除账号 ${account.id}（${remove.title}）`
-      : `删除账号 ${account.id || "新账号"}`,
+    canDelete
+      ? `删除账号 ${account.id || "新账号"}`
+      : `删除账号 ${account.id}（${remove.title}）`,
   );
   remove.addEventListener("click", () => {
     if (account.persisted) {
-      if (deleteBlockedReason !== "删除账号及已保存凭据") {
+      if (!canDelete) {
         showToast(deleteBlockedReason, true);
         return;
       }
@@ -1176,13 +1240,17 @@ function renderAccountEditor(account, accountIndex) {
   header.append(remove);
 
   const fields = node("div", { className: "account-fields" });
-  const existingAccount = Boolean(account.persisted);
   fields.append(
     makeLabel(
-      "账号 ID",
-      makeInput("text", account.id, (value) => {
-        account.id = value;
-      }, { required: true, readOnly: existingAccount }),
+      "账号名称",
+      makeInput("text", account.name || account.id, (value) => {
+        account.name = value;
+        accountHeading.textContent = value.trim() || account.id || "新账号";
+      }, { required: true, maxLength: 64 }),
+    ),
+    makeLabel(
+      "内部 ID",
+      makeInput("text", account.id, () => {}, { required: true, readOnly: true }),
     ),
     makeLabel(
       "权重",
@@ -1340,6 +1408,7 @@ function configPayload() {
   return {
     accounts: state.draft.accounts.map((account) => ({
       id: account.id,
+      name: account.name,
       weight: account.weight,
       requests_per_minute: account.requests_per_minute,
       burst: account.burst,
@@ -1524,14 +1593,6 @@ async function deleteAccount(accountId, button) {
     showToast(`账号 ${state.deletingAccountId} 正在删除，请稍候`, true);
     return;
   }
-  if (!state.config || state.config.accounts.length <= 1) {
-    showToast("请先添加并保存另一个账号，再删除此账号", true);
-    return;
-  }
-  if (state.config.routing?.configured_default_account === accountId) {
-    showToast("该账号是显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT", true);
-    return;
-  }
   const confirmed = window.confirm(
     `确认删除账号“${accountId}”及其已保存凭据？此操作立即生效。`,
   );
@@ -1666,7 +1727,11 @@ function renderConsoleAccounts() {
   select.append(automatic);
   const accounts = state.config ? state.config.accounts : [];
   for (const account of accounts) {
-    const option = node("option", { text: account.id });
+    const option = node("option", {
+      text: account.name && account.name !== account.id
+        ? `${account.name} (${account.id})`
+        : account.id,
+    });
     option.value = account.id;
     select.append(option);
   }
@@ -1807,8 +1872,10 @@ byId("add-account").addEventListener("click", () => {
     showToast(error.message, true);
     return;
   }
+  const identity = nextAccountIdentity();
   state.draft.accounts.push({
-    id: "",
+    id: identity.id,
+    name: identity.name,
     weight: 1,
     requests_per_minute: 10,
     burst: 10,

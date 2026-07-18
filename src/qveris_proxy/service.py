@@ -1280,9 +1280,20 @@ class ProxyService:
         try:
             quotas = await self.state.quota_snapshots()
             pool_status = await self.pool.status()
+            if not self.settings.config_write_enabled:
+                edit_reason = "persistent_editing_disabled"
+            elif self.settings.accounts_file_path is None:
+                edit_reason = "accounts_file_unavailable"
+            else:
+                edit_reason = None
+            account_names = {
+                account.id: account.name or account.id
+                for account in self.settings.accounts
+            }
             for account in pool_status:
                 account["quota"] = quotas.get(str(account["id"]))
                 account_id = str(account["id"])
+                account["name"] = account_names.get(account_id, account_id)
                 account["network"] = {
                     "proxy_configured": self.transports.proxy_configured_for(
                         account_id
@@ -1290,6 +1301,20 @@ class ProxyService:
                     "accept_language": self.transports.profile_for(
                         account_id
                     ).accept_language,
+                }
+                delete_reason = edit_reason
+                if delete_reason is None and len(self.settings.accounts) <= 1:
+                    delete_reason = "last_account_required"
+                if (
+                    delete_reason is None
+                    and self.settings.default_account == account_id
+                ):
+                    delete_reason = "default_account_locked"
+                account["management"] = {
+                    "can_edit": edit_reason is None,
+                    "edit_reason": edit_reason,
+                    "can_delete": delete_reason is None,
+                    "delete_reason": delete_reason,
                 }
             return pool_status
         finally:

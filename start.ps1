@@ -299,6 +299,7 @@ document = {
     "accounts": [
         {
             "id": "account-a",
+            "name": "账号 1",
             "weight": 1,
             "requests_per_minute": 10,
             "burst": 10,

@@ -2,6 +2,7 @@
   "accounts": [
     {
       "id": "account-a",
+      "name": "主账号",
       "weight": 2,
       "requests_per_minute": 10,
       "burst": 10,
@@ -19,6 +20,7 @@
     },
     {
       "id": "account-b",
+      "name": "备用账号",
       "weight": 1,
       "requests_per_minute": 10,
       "burst": 10,

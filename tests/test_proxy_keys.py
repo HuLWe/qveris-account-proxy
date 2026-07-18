@@ -138,12 +138,44 @@ async def test_proxy_key_admin_crud_returns_secret_only_when_created(
             assert empty_update.status_code == 400
             assert missing.status_code == 404
             assert protected.status_code == 409
+            assert protected.json()["detail"] == "primary_proxy_access_key_required"
 
             deleted = await client.delete(
                 f"/admin/v1/proxy-keys/{key['id']}", headers=admin_headers()
             )
             assert deleted.status_code == 200
             assert deleted.json() == {"deleted": key["id"]}
+
+            remaining = await client.get(
+                "/admin/v1/proxy-keys", headers=admin_headers()
+            )
+            primary_request = await client.post(
+                "/api/v1/search",
+                headers=proxy_headers(ACCESS_TOKEN),
+                json={"query": "primary remains active"},
+            )
+            assert [item["id"] for item in remaining.json()["keys"]] == ["primary"]
+            assert primary_request.status_code == 200
+
+    restarted = create_app(
+        make_settings(state_path=str(state_path)),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(restarted):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=restarted),
+            base_url="http://proxy.test",
+        ) as client:
+            remaining = await client.get(
+                "/admin/v1/proxy-keys", headers=admin_headers()
+            )
+            primary_request = await client.post(
+                "/api/v1/search",
+                headers=proxy_headers(ACCESS_TOKEN),
+                json={"query": "primary survives restart"},
+            )
+            assert [item["id"] for item in remaining.json()["keys"]] == ["primary"]
+            assert primary_request.status_code == 200
 
     database_bytes = state_path.read_bytes()
     assert secret.encode() not in database_bytes

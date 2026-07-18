@@ -104,6 +104,7 @@ class AccountConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str
+    name: str | None = None
     weight: int = Field(default=1, ge=1, le=100)
     requests_per_minute: float = Field(default=10.0, ge=1, le=10_000)
     burst: int = Field(default=10, ge=1, le=10_000)
@@ -117,6 +118,16 @@ class AccountConfig(BaseModel):
         if not _IDENTIFIER.fullmatch(value):
             raise ValueError("account id must be a short URL-safe identifier")
         return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or len(normalized) > 64:
+            raise ValueError("account name must contain between 1 and 64 characters")
+        return normalized
 
     @model_validator(mode="after")
     def validate_credentials(self) -> AccountConfig:

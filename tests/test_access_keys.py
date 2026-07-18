@@ -144,6 +144,7 @@ async def test_managed_key_is_one_time_secret_and_primary_cannot_be_deleted(
 
     with pytest.raises(PrimaryProxyAccessKeyRequired):
         await manager.delete("primary")
+    assert await store.delete_proxy_access_key("primary") is False
     await manager.delete(created.key.id)
     assert [key.id for key in await manager.list()] == ["primary"]
     await store.close()

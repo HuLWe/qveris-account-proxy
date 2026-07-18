@@ -26,6 +26,29 @@ def test_settings_repr_redacts_all_secrets() -> None:
     assert "proxy_access_token" not in rendered
 
 
+def test_account_display_name_is_trimmed_and_validated() -> None:
+    account = AccountConfig(
+        id="account-a",
+        name="  主账号  ",
+        keys=(APIKeyConfig(id="primary", api_key=KEY_A1),),
+    )
+    assert account.name == "主账号"
+
+    with pytest.raises(ValidationError):
+        AccountConfig(
+            id="account-a",
+            name="   ",
+            keys=(APIKeyConfig(id="primary", api_key=KEY_A1),),
+        )
+
+    with pytest.raises(ValidationError):
+        AccountConfig(
+            id="account-a",
+            name="x" * 65,
+            keys=(APIKeyConfig(id="primary", api_key=KEY_A1),),
+        )
+
+
 def test_rejects_duplicate_provider_keys_without_echoing_value() -> None:
     with pytest.raises(ValidationError) as captured:
         ProxySettings(
@@ -88,7 +111,9 @@ def test_multiple_accounts_use_a_dynamic_default_only_for_round_robin() -> None:
 def test_first_open_browser_claim_is_opt_in() -> None:
     assert make_settings().admin_first_open_claim_enabled is False
     assert (
-        make_settings(admin_first_open_claim_enabled=True).admin_first_open_claim_enabled
+        make_settings(
+            admin_first_open_claim_enabled=True
+        ).admin_first_open_claim_enabled
         is True
     )
 

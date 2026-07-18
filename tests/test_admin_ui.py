@@ -52,11 +52,12 @@ class _BlockingAdminResponseStream(httpx.AsyncByteStream):
         yield b'stream"}'
 
 
-def editable_payload(*, weight: int = 1) -> dict[str, object]:
+def editable_payload(*, weight: int = 1, name: str = "主账号") -> dict[str, object]:
     return {
         "accounts": [
             {
                 "id": "account-a",
+                "name": name,
                 "weight": weight,
                 "requests_per_minute": 10_000,
                 "burst": 10_000,
@@ -158,6 +159,9 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"showCreatedProxySecret" in script.content
     assert b"clearCreatedProxySecret" in script.content
     assert b"proxyKeyErrorMessage" in script.content
+    assert b'remove.disabled = busy || key.kind === "primary"' in script.content
+    assert "默认代理 Key 为系统保留，不可删除".encode() in script.content
+    assert b'if (key.kind === "primary")' in script.content
     assert b".key-dialog" in stylesheet.content
     assert 'aria-label="接入应用"'.encode() in shell.content
     assert 'aria-label="复制全部接入配置"'.encode() in shell.content
@@ -166,8 +170,8 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b'id="topbar-actions" hidden' in shell.content
     assert b'id="manual-connect"' in shell.content
     assert b">\xe5\xa4\x8d\xe5\x88\xb6</button>" in shell.content
-    assert b'window.crypto.getRandomValues' in script.content
-    assert b'window.confirm' in script.content
+    assert b"window.crypto.getRandomValues" in script.content
+    assert b"window.confirm" in script.content
     assert b'method: "DELETE"' in script.content
     assert b"Promise.allSettled" in script.content
     assert b"deletingAccountId" in script.content
@@ -175,6 +179,9 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"function editAccount" in script.content
     assert b'activateTab("config")' in script.content
     assert b"editButton.dataset.accountEdit" in script.content
+    assert "账号名称".encode() in script.content
+    assert "内部 ID".encode() in script.content
+    assert b"nextAccountIdentity" in script.content
     assert b"actionGroup.append(testButton, editButton, deleteButton)" in script.content
     assert b"deleteButton.disabled = deleteInProgress" in script.content
     assert b"remove.disabled = deleteInProgress" in script.content
@@ -285,13 +292,9 @@ async def test_authenticated_browser_session_can_resume_and_disconnect() -> None
             remembered = await client.post(
                 "/admin/v1/browser-session", headers=auth_headers()
             )
-            resumed = await client.get(
-                "/admin/v1/browser-session", headers=header
-            )
+            resumed = await client.get("/admin/v1/browser-session", headers=header)
             disconnected = await client.delete("/admin/v1/browser-session")
-            expired = await client.get(
-                "/admin/v1/browser-session", headers=header
-            )
+            expired = await client.get("/admin/v1/browser-session", headers=header)
 
     assert disabled_claim.status_code == 403
     assert denied.status_code == 401
@@ -411,6 +414,7 @@ async def test_admin_config_and_operation_catalog_require_auth_and_redact() -> N
     assert config.headers["cache-control"] == "no-store"
     payload = config.json()
     assert payload["capabilities"]["persistent_editing"] is False
+    assert payload["accounts"][0]["name"] == "account-a"
     assert payload["accounts"][0]["keys"] == [
         {"id": "primary", "configured": True},
         {"id": "standby", "configured": True},
@@ -429,6 +433,58 @@ async def test_admin_config_and_operation_catalog_require_auth_and_redact() -> N
     assert {(item["method"], item["path"]) for item in operations} == set(
         PUBLIC_OPERATIONS
     )
+
+
+@pytest.mark.asyncio
+async def test_account_status_reports_authoritative_management_actions(
+    tmp_path: Path,
+) -> None:
+    async def status_for(settings) -> list[dict[str, object]]:
+        app = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+        async with LifespanManager(app):
+            async with await app_client(app) as client:
+                response = await client.get(
+                    "/admin/v1/accounts", headers=auth_headers()
+                )
+        assert response.status_code == 200
+        return response.json()["accounts"]
+
+    read_only = await status_for(make_settings())
+    assert read_only[0]["name"] == "account-a"
+    assert read_only[0]["management"] == {
+        "can_edit": False,
+        "edit_reason": "persistent_editing_disabled",
+        "can_delete": False,
+        "delete_reason": "persistent_editing_disabled",
+    }
+
+    single_path = tmp_path / "single.json"
+    single_settings = make_settings(
+        accounts_file_path=str(single_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    single_path.write_bytes(serialize_accounts(single_settings.accounts))
+    single = await status_for(single_settings)
+    assert single[0]["management"]["can_edit"] is True
+    assert single[0]["management"]["can_delete"] is False
+    assert single[0]["management"]["delete_reason"] == "last_account_required"
+
+    multiple_path = tmp_path / "multiple.json"
+    multiple_settings = make_settings(
+        multiple_accounts=True,
+        default_account="account-b",
+        accounts_file_path=str(multiple_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+    )
+    multiple_path.write_bytes(serialize_accounts(multiple_settings.accounts))
+    multiple = await status_for(multiple_settings)
+    management = {item["id"]: item["management"] for item in multiple}
+    assert management["account-a"]["can_delete"] is True
+    assert management["account-b"]["can_edit"] is True
+    assert management["account-b"]["can_delete"] is False
+    assert management["account-b"]["delete_reason"] == "default_account_locked"
 
 
 @pytest.mark.asyncio
@@ -523,12 +579,14 @@ async def test_persistent_editing_preserves_existing_values_and_hot_reloads(
     assert saved.status_code == 200
     assert saved.json()["reload"]["applied"] is True
     assert saved.json()["config"]["accounts"][0]["weight"] == 4
+    assert saved.json()["config"]["accounts"][0]["name"] == "主账号"
     assert KEY_A1 not in saved.text
     assert KEY_A2 not in saved.text
     assert OAUTH_A1 not in saved.text
     assert new_key not in saved.text
     stored = json.loads(accounts_path.read_text(encoding="utf-8"))
     account = stored["accounts"][0]
+    assert account["name"] == "主账号"
     assert account["weight"] == 4
     assert [item["api_key"] for item in account["keys"]] == [
         KEY_A1,
@@ -537,6 +595,7 @@ async def test_persistent_editing_preserves_existing_values_and_hot_reloads(
     ]
     assert account["oauth_tokens"][0]["access_token"] == OAUTH_A1
     assert config.json()["accounts"][0]["weight"] == 4
+    assert config.json()["accounts"][0]["name"] == "主账号"
     assert [item["id"] for item in config.json()["accounts"][0]["keys"]] == [
         "primary",
         "standby",
@@ -640,7 +699,10 @@ async def test_delete_during_stream_does_not_restore_removed_account_affinity(
     app = create_app(settings, transport=httpx.MockTransport(upstream))
     async with LifespanManager(app):
         service = app.state.proxy_service
-        async with await app_client(app) as slow_client, await app_client(app) as control:
+        async with (
+            await app_client(app) as slow_client,
+            await app_client(app) as control,
+        ):
             slow_request = asyncio.create_task(
                 slow_client.post(
                     "/api/v1/search",

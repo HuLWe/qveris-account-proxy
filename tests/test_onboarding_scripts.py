@@ -220,10 +220,11 @@ def test_launchers_include_the_same_first_run_contract() -> None:
         assert "secrets.token_hex(32)" not in launcher
         assert "bootstrap_ticket" in launcher
         assert "admin/v1/bootstrap-ticket" in launcher
-        assert 'profile_id = secrets.token_hex(16)' in launcher
-        assert 'secrets.choice(' in launcher
-        assert 'profile/{profile_id}' in launcher
-        assert '“运行状态”的“接入应用”区域' in launcher
+        assert "profile_id = secrets.token_hex(16)" in launcher
+        assert '"name": "账号 1"' in launcher
+        assert "secrets.choice(" in launcher
+        assert "profile/{profile_id}" in launcher
+        assert "“运行状态”的“接入应用”区域" in launcher
         assert "页面右上角" not in launcher
         assert "?launch=" in launcher
         assert "0o700" in launcher
@@ -456,7 +457,10 @@ def test_documentation_and_ignore_rules_match_the_delivery_flow() -> None:
     assert "## 3 步快速开始" in readme
     assert REGISTRATION_URL in readme
     assert INVITE_CODE in readme
-    assert "https://github.com/HuLWe/qveris-account-proxy/archive/refs/heads/main.zip" in readme
+    assert (
+        "https://github.com/HuLWe/qveris-account-proxy/archive/refs/heads/main.zip"
+        in readme
+    )
     assert "普通用户不需要安装 Git" in readme
     assert ".\\start.ps1" in readme
     assert "./start.sh" in readme

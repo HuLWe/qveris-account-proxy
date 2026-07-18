@@ -43,6 +43,7 @@ class AccountInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    name: str | None = None
     weight: int = 1
     requests_per_minute: float = 10.0
     burst: int = 10
@@ -77,6 +78,7 @@ def public_config(settings: ProxySettings) -> dict[str, object]:
         "accounts": [
             {
                 "id": account.id,
+                "name": account.name or account.id,
                 "weight": account.weight,
                 "requests_per_minute": account.requests_per_minute,
                 "burst": account.burst,
@@ -151,9 +153,14 @@ def parse_admin_accounts(
             proxy_url_file = item.transport.proxy_url_file
             if proxy_url_file is None and previous is not None:
                 proxy_url_file = previous.transport.proxy_url_file
+            account_name = item.name
+            if account_name is None:
+                previous_name = previous.name if previous is not None else None
+                account_name = previous_name or item.id
             accounts.append(
                 AccountConfig(
                     id=item.id,
+                    name=account_name,
                     weight=item.weight,
                     requests_per_minute=item.requests_per_minute,
                     burst=item.burst,
@@ -193,6 +200,7 @@ def serialize_accounts(accounts: tuple[AccountConfig, ...]) -> bytes:
         rendered_accounts.append(
             {
                 "id": account.id,
+                "name": account.name or account.id,
                 "weight": account.weight,
                 "requests_per_minute": account.requests_per_minute,
                 "burst": account.burst,
