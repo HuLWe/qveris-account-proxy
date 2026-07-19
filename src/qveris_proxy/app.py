@@ -628,7 +628,6 @@ def _raise_admin_config_error(code: str) -> None:
         "account_not_found": 404,
         "persistent_editing_disabled": 403,
         "accounts_file_unavailable": 409,
-        "last_account_required": 409,
         "default_account_locked": 409,
         "config_revision_conflict": 409,
         "config_reload_failed": 409,

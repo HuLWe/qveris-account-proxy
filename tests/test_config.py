@@ -108,6 +108,23 @@ def test_multiple_accounts_use_a_dynamic_default_only_for_round_robin() -> None:
     assert settings_with_default.effective_default_account == "account-b"
 
 
+def test_empty_accounts_are_a_valid_waiting_state() -> None:
+    settings = ProxySettings(
+        proxy_access_token=ACCESS_TOKEN,
+        accounts=(),
+    )
+
+    assert settings.accounts == ()
+    assert settings.effective_default_account is None
+
+    with pytest.raises(ValidationError):
+        ProxySettings(
+            proxy_access_token=ACCESS_TOKEN,
+            accounts=(),
+            default_account="removed-account",
+        )
+
+
 def test_first_open_browser_claim_is_opt_in() -> None:
     assert make_settings().admin_first_open_claim_enabled is False
     assert (

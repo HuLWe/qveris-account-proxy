@@ -76,7 +76,11 @@ credential values out of commands, logs, Git, and responses.
    unchanged account-configuration hash, state-database integrity, clean
    startup logs, `/health/live`, `/health/ready`, and a static UI marker. Do not
    open `/admin/` during unattended validation when first-browser claim may
-   still be unused.
+   still be unused. Require `/health/ready` to return `200` when accounts are
+   configured. A `503` response with `{"status":"degraded"}` is expected only
+   when the user explicitly intended to leave the account pool empty or the
+   same verified transaction deleted the final account; `/health/live` and the
+   Docker health state must still be healthy in that case.
 10. On failure, restore the backed-up source and Compose files first, retag the
     rollback image as `local`, recreate the same service with the same mounts
     and environment, and repeat configuration-hash and health checks. Do not

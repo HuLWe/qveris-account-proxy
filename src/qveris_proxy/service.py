@@ -404,8 +404,6 @@ class ProxyService:
         await self._sync_pending_admin_config_locked()
         if not any(account.id == account_id for account in self.settings.accounts):
             raise AdminConfigError("account_not_found")
-        if len(self.settings.accounts) == 1:
-            raise AdminConfigError("last_account_required")
         if self.settings.default_account == account_id:
             raise AdminConfigError("default_account_locked")
         accounts = tuple(
@@ -564,6 +562,12 @@ class ProxyService:
         try:
             try:
                 if operation.provider_auth:
+                    if not request_pool.account_ids():
+                        raise HTTPException(
+                            status_code=503,
+                            detail="no QVeris accounts are configured",
+                            headers={"Retry-After": "1"},
+                        )
                     credential_kind = operation.credential_kind
                     assert credential_kind is not None
                     fallback_credential_kind = (
@@ -1337,8 +1341,6 @@ class ProxyService:
                     ).accept_language,
                 }
                 delete_reason = edit_reason
-                if delete_reason is None and len(self.settings.accounts) <= 1:
-                    delete_reason = "last_account_required"
                 if (
                     delete_reason is None
                     and self.settings.default_account == account_id

@@ -18,6 +18,7 @@ from qveris_proxy.bootstrap import (
     AdminBrowserSessions,
     AdminBootstrapTickets,
 )
+from qveris_proxy.config import load_settings
 from qveris_proxy.routes import PUBLIC_OPERATIONS, QVERIS_API_VERSION
 from qveris_proxy.state import StoredCooldown
 from conftest import (
@@ -189,7 +190,12 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"actionGroup.append(testButton, editButton, deleteButton)" in script.content
     assert b"deleteButton.disabled = deleteInProgress" in script.content
     assert b"remove.disabled = deleteInProgress" in script.content
-    assert "请先添加并保存另一个账号".encode() in script.content
+    assert b"last_account_required" not in script.content
+    assert "暂无已配置账号".encode() in script.content
+    assert (
+        b"const hasDynamicDefault = state.config.accounts.length === 1"
+        in script.content
+    )
     assert "稳定连接标识".encode() in script.content
     assert b"[hidden]" in stylesheet.content
     assert b"display: none !important" in stylesheet.content
@@ -471,8 +477,8 @@ async def test_account_status_reports_authoritative_management_actions(
     single_path.write_bytes(serialize_accounts(single_settings.accounts))
     single = await status_for(single_settings)
     assert single[0]["management"]["can_edit"] is True
-    assert single[0]["management"]["can_delete"] is False
-    assert single[0]["management"]["delete_reason"] == "last_account_required"
+    assert single[0]["management"]["can_delete"] is True
+    assert single[0]["management"]["delete_reason"] is None
 
     multiple_path = tmp_path / "multiple.json"
     multiple_settings = make_settings(
@@ -704,6 +710,9 @@ async def test_account_delete_is_immediate_persistent_and_cleans_runtime_state(
     async with LifespanManager(app):
         service = app.state.proxy_service
         await service.state.set_affinities({"delete-account-fixture"}, "account-a", 60)
+        await service.state.set_affinities(
+            {"delete-last-account-fixture"}, "account-b", 60
+        )
         await service.state.save_cooldown(
             StoredCooldown(
                 scope="account",
@@ -712,8 +721,19 @@ async def test_account_delete_is_immediate_persistent_and_cleans_runtime_state(
                 until_epoch=9_999_999_999,
             )
         )
+        await service.state.save_cooldown(
+            StoredCooldown(
+                scope="account",
+                account_id="account-b",
+                name="delete-last-fixture",
+                until_epoch=9_999_999_999,
+            )
+        )
         await service.state.save_quota_snapshot(
             "account-a", 200, {"remaining_credits": 12}
+        )
+        await service.state.save_quota_snapshot(
+            "account-b", 200, {"remaining_credits": 8}
         )
 
         async with await app_client(app) as client:
@@ -729,13 +749,29 @@ async def test_account_delete_is_immediate_persistent_and_cleans_runtime_state(
             last = await client.delete(
                 "/admin/v1/accounts/account-b", headers=auth_headers()
             )
+            empty_config = await client.get("/admin/v1/config", headers=auth_headers())
+            empty_status = await client.get(
+                "/admin/v1/accounts", headers=auth_headers()
+            )
+            unavailable = await client.post(
+                "/api/v1/search",
+                headers=auth_headers(),
+                json={"query": "empty account fixture"},
+            )
 
         assert await service.state.get_affinity("delete-account-fixture") is None
-        assert not any(
-            item.account_id == "account-a"
-            for item in await service.state.load_cooldowns()
+        assert await service.state.get_affinity("delete-last-account-fixture") is None
+        assert not {
+            "account-a",
+            "account-b",
+        } & {item.account_id for item in await service.state.load_cooldowns()}
+        assert (
+            not {
+                "account-a",
+                "account-b",
+            }
+            & (await service.state.quota_snapshots()).keys()
         )
-        assert "account-a" not in await service.state.quota_snapshots()
 
     assert denied.status_code == 401
     assert deleted.status_code == 200
@@ -748,10 +784,166 @@ async def test_account_delete_is_immediate_persistent_and_cleans_runtime_state(
     assert [item["id"] for item in status.json()["accounts"]] == ["account-b"]
     assert unknown.status_code == 404
     assert unknown.json() == {"detail": "account_not_found"}
-    assert last.status_code == 409
-    assert last.json() == {"detail": "last_account_required"}
+    assert last.status_code == 200
+    assert last.json()["deleted"] == "account-b"
+    assert last.json()["reload"]["applied"] is True
+    assert empty_config.json()["routing"]["default_account"] is None
+    assert empty_config.json()["accounts"] == []
+    assert empty_status.json()["accounts"] == []
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"detail": "no QVeris accounts are configured"}
     stored = json.loads(accounts_path.read_text(encoding="utf-8"))
-    assert [item["id"] for item in stored["accounts"]] == ["account-b"]
+    assert stored["accounts"] == []
+    assert list(tmp_path.glob(".accounts-*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_account_configuration_survives_restart_and_can_recover(
+    tmp_path: Path,
+) -> None:
+    accounts_path = tmp_path / "accounts.json"
+    token_path = tmp_path / "proxy-token"
+    state_path = tmp_path / "state.db"
+    settings = make_settings(
+        routing_mode="round_robin",
+        accounts_file_path=str(accounts_path),
+        accounts_reload_interval_seconds=0,
+        config_write_enabled=True,
+        state_path=str(state_path),
+    )
+    accounts_path.write_bytes(serialize_accounts(settings.accounts))
+    token_path.write_text(ACCESS_TOKEN, encoding="utf-8")
+
+    first = create_app(settings, transport=httpx.MockTransport(lambda _: None))
+    async with LifespanManager(first):
+        first_service = first.state.proxy_service
+        await first_service.state.set_affinities(
+            {"restart-delete-fixture"}, "account-a", 60
+        )
+        await first_service.state.save_cooldown(
+            StoredCooldown(
+                scope="account",
+                account_id="account-a",
+                name="restart-delete-fixture",
+                until_epoch=9_999_999_999,
+            )
+        )
+        await first_service.state.save_quota_snapshot(
+            "account-a", 200, {"remaining_credits": 4}
+        )
+        async with await app_client(first) as client:
+            deleted = await client.delete(
+                "/admin/v1/accounts/account-a", headers=auth_headers()
+            )
+            empty = await client.get("/admin/v1/config", headers=auth_headers())
+
+    assert deleted.status_code == 200
+    assert empty.json()["accounts"] == []
+    empty_revision = empty.json()["revision"]
+    assert json.loads(accounts_path.read_text(encoding="utf-8"))["accounts"] == []
+
+    restart_environment = {
+        "QVP_ACCOUNTS_FILE": str(accounts_path),
+        "QVP_ACCESS_TOKEN_FILE": str(token_path),
+        "QVP_STATE_PATH": str(state_path),
+        "QVP_ROUTING_MODE": "round_robin",
+        "QVP_CONFIG_WRITE_ENABLED": "true",
+        "QVP_ACCOUNTS_RELOAD_INTERVAL_SECONDS": "0",
+        "QVP_QUOTA_REFRESH_INTERVAL_SECONDS": "0",
+    }
+    restarted_settings = load_settings(restart_environment)
+    upstream_paths: list[str] = []
+    upstream_authorizations: list[str | None] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_paths.append(request.url.path)
+        upstream_authorizations.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"version": QVERIS_API_VERSION})
+
+    restarted = create_app(
+        restarted_settings,
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(restarted):
+        restarted_service = restarted.state.proxy_service
+        assert (
+            await restarted_service.state.get_affinity("restart-delete-fixture") is None
+        )
+        assert await restarted_service.state.load_cooldowns() == []
+        assert await restarted_service.state.quota_snapshots() == {}
+        async with await app_client(restarted) as client:
+            config = await client.get("/admin/v1/config", headers=auth_headers())
+            status = await client.get("/admin/v1/accounts", headers=auth_headers())
+            live = await client.get("/health/live")
+            ready = await client.get("/health/ready")
+            unavailable = await client.post(
+                "/api/v1/search",
+                headers={**auth_headers(), "X-QVeris-Account": "removed-account"},
+                json={"query": "empty restart fixture"},
+            )
+            public_meta = await client.get("/api/v1/meta")
+            validated = await client.post(
+                "/admin/v1/config/validate",
+                headers=auth_headers(),
+                json={"revision": config.json()["revision"], "accounts": []},
+            )
+            recovered = await client.put(
+                "/admin/v1/config",
+                headers=auth_headers(),
+                json={
+                    "revision": config.json()["revision"],
+                    "accounts": [
+                        {
+                            "id": "account-recovered",
+                            "name": "Recovered account",
+                            "weight": 1,
+                            "requests_per_minute": 10,
+                            "burst": 10,
+                            "transport": {
+                                "user_agent": "qveris-account-proxy/0.1.0",
+                                "accept_language": "en-US,en;q=0.9",
+                                "proxy_url_file": None,
+                            },
+                            "keys": [{"id": "primary", "value": KEY_A1}],
+                            "oauth_tokens": [],
+                        }
+                    ],
+                },
+            )
+            recovered_status = await client.get(
+                "/admin/v1/accounts", headers=auth_headers()
+            )
+            recovered_ready = await client.get("/health/ready")
+            recovered_request = await client.post(
+                "/api/v1/search",
+                headers=auth_headers(),
+                json={"query": "recovered account fixture"},
+            )
+
+    assert config.json()["revision"] == empty_revision
+    assert config.json()["accounts"] == []
+    assert status.json()["accounts"] == []
+    assert live.status_code == 200
+    assert ready.status_code == 503
+    assert ready.json() == {"status": "degraded"}
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"detail": "no QVeris accounts are configured"}
+    assert upstream_paths == ["/api/v1/meta", "/api/v1/search"]
+    assert upstream_authorizations == [None, f"Bearer {KEY_A1}"]
+    assert public_meta.status_code == 200
+    assert validated.status_code == 200
+    assert validated.json()["account_count"] == 0
+    assert recovered.status_code == 200
+    assert [item["id"] for item in recovered.json()["config"]["accounts"]] == [
+        "account-recovered"
+    ]
+    assert [item["id"] for item in recovered_status.json()["accounts"]] == [
+        "account-recovered"
+    ]
+    assert recovered_ready.status_code == 200
+    assert recovered_request.status_code == 200
+    persisted = load_settings(restart_environment)
+    assert [account.id for account in persisted.accounts] == ["account-recovered"]
     assert list(tmp_path.glob(".accounts-*.tmp")) == []
 
 
@@ -873,18 +1065,26 @@ async def test_explicit_default_account_must_be_changed_before_delete(
     async with LifespanManager(app):
         async with await app_client(app) as client:
             config = await client.get("/admin/v1/config", headers=auth_headers())
+            removed_non_default = await client.delete(
+                "/admin/v1/accounts/account-a", headers=auth_headers()
+            )
+            status = await client.get("/admin/v1/accounts", headers=auth_headers())
             response = await client.delete(
                 "/admin/v1/accounts/account-b", headers=auth_headers()
             )
 
     assert config.json()["routing"]["configured_default_account"] == "account-b"
+    assert removed_non_default.status_code == 200
+    assert status.json()["accounts"][0]["management"] == {
+        "can_edit": True,
+        "edit_reason": None,
+        "can_delete": False,
+        "delete_reason": "default_account_locked",
+    }
     assert response.status_code == 409
     assert response.json() == {"detail": "default_account_locked"}
     stored = json.loads(accounts_path.read_text(encoding="utf-8"))
-    assert [item["id"] for item in stored["accounts"]] == [
-        "account-a",
-        "account-b",
-    ]
+    assert [item["id"] for item in stored["accounts"]] == ["account-b"]
 
 
 @pytest.mark.asyncio

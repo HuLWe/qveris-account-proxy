@@ -68,7 +68,7 @@ bash ./start.sh --lan
 
 “代理 Key”页签可按用户或应用创建任意数量的 `sk-` Key。每个 Key 可独立设置启停、累计请求上限、每分钟请求上限、最大并发和到期时间，并可随时编辑、重置用量或删除。新 Key 的完整明文只在创建成功时显示一次；SQLite 只保存 SHA-256 哈希和脱敏前后缀，因此创建后应立即复制到目标应用。默认代理 Key 为系统保留，不能删除；管理认证只接受默认代理 Key，普通托管 Key 只能调用代理 API。
 
-每个账号都有独立连接池和可保存的稳定连接标识。点击“重新生成”会为该账号生成一次新的 User-Agent 标识和语言组合，保存后保持固定；轻量 API 模式不包含 Canvas、WebGL 或 TLS 浏览器指纹。运行状态表提供“编辑”和“删除”按钮，“编辑”会直接定位到对应账号配置，“删除”确认后立即删除该代理账号及其已保存凭据。最后一个账号仍会保留，先添加并保存替代账号后即可删除原账号。
+每个账号都有独立连接池和可保存的稳定连接标识。点击“重新生成”会为该账号生成一次新的 User-Agent 标识和语言组合，保存后保持固定；轻量 API 模式不包含 Canvas、WebGL 或 TLS 浏览器指纹。运行状态表提供“编辑”和“删除”按钮，“编辑”会直接定位到对应账号配置，“删除”确认后立即删除该代理账号及其已保存凭据。最后一个账号也可删除；删除后管理页保持可用，数据接口会进入待配置状态，重新添加并保存账号后恢复服务。
 
 打开 Vibe-Trading 设置页（例如 http://127.0.0.1:8899/settings），在管理页“接入应用”区域复制主 Key，或在“代理 Key”页为该应用创建独立 Key，然后填入这两个字段：
 
@@ -84,7 +84,7 @@ API Key:  管理页中的代理 API Key
 把下面整段发给能操作本机终端的 Agent；Agent 只负责下载、启动和验证，首个上游 API key 由用户在终端的隐藏输入框中自行填写：
 
 ~~~text
-从 https://github.com/HuLWe/qveris-account-proxy 安装 main 分支最新版 QVeris Account Proxy。先确认操作系统、安装目录、仅本机或局域网模式、18081 端口、Docker Engine 与 Docker Compose v2；若已有同名 qveris-proxy 项目，先让我选择复用原数据卷或使用新的 QVP_PROJECT_NAME。不要安装额外的 Python 环境，不要读取、记录或回显任何 API key、启动票据或令牌命令输出。Windows 使用 .\start.cmd，局域网共享时使用 .\start.cmd -Lan；macOS/Linux 使用 bash ./start.sh，局域网共享时加 --lan。脚本需要首个 QVeris API key 时暂停，让我直接在终端隐藏输入。启动后验证容器 healthy、/health/ready 返回 200，并只用 HTTP 检查 /admin/assets/admin.js；不要用 Agent 浏览器打开 /admin/，首次连接由我的浏览器完成。保留当前 Compose 项目的全部 named volumes（卷名通常带项目名前缀），只报告管理页地址和 API Base URL。
+从 https://github.com/HuLWe/qveris-account-proxy 安装 main 分支最新版 QVeris Account Proxy。先确认操作系统、安装目录、仅本机或局域网模式、18081 端口、Docker Engine 与 Docker Compose v2；若已有同名 qveris-proxy 项目，先让我选择复用原数据卷或使用新的 QVP_PROJECT_NAME。不要安装额外的 Python 环境，不要读取、记录或回显任何 API key、启动票据或令牌命令输出。Windows 使用 .\start.cmd，局域网共享时使用 .\start.cmd -Lan；macOS/Linux 使用 bash ./start.sh，局域网共享时加 --lan。脚本需要首个 QVeris API key 时暂停，让我直接在终端隐藏输入。启动后验证容器 healthy；有账号时 /health/ready 应返回 200，只有在我明确复用已删空的账号池时才接受 503 和 {"status":"degraded"}，此时管理页仍应可访问。只用 HTTP 检查 /admin/assets/admin.js；不要用 Agent 浏览器打开 /admin/，首次连接由我的浏览器完成。保留当前 Compose 项目的全部 named volumes（卷名通常带项目名前缀），只报告管理页地址和 API Base URL。
 ~~~
 
 没有 Git 时可让 Agent 下载 `https://github.com/HuLWe/qveris-account-proxy/archive/refs/heads/main.zip`，解压后执行同一启动脚本。

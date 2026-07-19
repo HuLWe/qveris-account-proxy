@@ -56,7 +56,7 @@ class AccountsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    accounts: tuple[AccountInput, ...] = Field(min_length=1)
+    accounts: tuple[AccountInput, ...]
 
 
 def public_config(settings: ProxySettings) -> dict[str, object]:

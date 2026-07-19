@@ -457,7 +457,6 @@ function accountManagementMessage(code) {
   return {
     persistent_editing_disabled: "持久编辑未启用",
     accounts_file_unavailable: "账号配置文件不可写",
-    last_account_required: "请先添加并保存另一个账号，再删除此账号",
     default_account_locked: "显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT",
   }[code] || code || "当前账号不可管理";
 }
@@ -580,6 +579,13 @@ function renderStatus() {
 
   const body = byId("accounts-status");
   clear(body);
+  if (!accounts.length) {
+    const empty = node("td", { className: "empty-row", text: "暂无已配置账号" });
+    empty.colSpan = 7;
+    const row = node("tr");
+    row.append(empty);
+    body.append(row);
+  }
   for (const account of accounts) {
     const row = node("tr");
     const identity = node("td");
@@ -696,11 +702,9 @@ function renderStatus() {
     const deleteInProgress = Boolean(state.deletingAccountId);
     const fallbackDeleteReason = !writable
       ? "persistent_editing_disabled"
-      : accounts.length <= 1
-        ? "last_account_required"
-        : state.config?.routing?.configured_default_account === account.id
-          ? "default_account_locked"
-          : null;
+      : state.config?.routing?.configured_default_account === account.id
+        ? "default_account_locked"
+        : null;
     const canDelete = typeof management.can_delete === "boolean"
       ? management.can_delete
       : fallbackDeleteReason === null;
@@ -1223,11 +1227,9 @@ function renderAccountEditor(account, accountIndex) {
   const management = account.persisted ? managementForAccount(account.id) : null;
   const fallbackDeleteReason = !writable
     ? "persistent_editing_disabled"
-    : account.persisted && state.config.accounts.length <= 1
-      ? "last_account_required"
-      : state.config.routing?.configured_default_account === account.id
-        ? "default_account_locked"
-        : null;
+    : state.config.routing?.configured_default_account === account.id
+      ? "default_account_locked"
+      : null;
   const canDelete = !account.persisted || (management
     ? management.can_delete
     : fallbackDeleteReason === null);
@@ -1560,7 +1562,6 @@ function deleteErrorMessage(code) {
   return {
     account_not_found: "账号已不存在，请刷新状态",
     default_account_locked: "该账号是显式默认账号，请先修改 QVP_DEFAULT_ACCOUNT",
-    last_account_required: "至少保留一个账号",
     persistent_editing_disabled: "持久编辑未启用",
     accounts_file_unavailable: "账号配置文件不可用，删除未执行",
     apply_failed: "删除未完成，原账号配置已恢复",
@@ -1591,10 +1592,12 @@ function removeDeletedAccountLocally(accountId) {
     );
     if (
       state.config.routing &&
-      state.config.routing.mode === "round_robin" &&
-      state.config.routing.default_account === accountId
+      !state.config.routing.configured_default_account
     ) {
-      state.config.routing.default_account = state.config.accounts.length
+      const hasDynamicDefault = state.config.accounts.length === 1 ||
+        state.config.routing.mode === "round_robin";
+      state.config.routing.default_account = hasDynamicDefault &&
+        state.config.accounts.length
         ? state.config.accounts[0].id
         : null;
     }

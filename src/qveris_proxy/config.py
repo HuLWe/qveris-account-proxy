@@ -145,7 +145,7 @@ class AccountConfig(BaseModel):
 class ProxySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    accounts: tuple[AccountConfig, ...] = Field(min_length=1)
+    accounts: tuple[AccountConfig, ...]
     proxy_access_token: SecretStr = Field(repr=False)
     default_account: str | None = None
     routing_mode: Literal["explicit", "round_robin"] = "round_robin"
@@ -219,6 +219,8 @@ class ProxySettings(BaseModel):
     def effective_default_account(self) -> str | None:
         if self.default_account is not None:
             return self.default_account
+        if not self.accounts:
+            return None
         if len(self.accounts) == 1 or self.routing_mode == "round_robin":
             return self.accounts[0].id
         return None

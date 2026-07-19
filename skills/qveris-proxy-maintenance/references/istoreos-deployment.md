@@ -110,9 +110,13 @@ Validate without visiting `/admin/`:
 
 ```powershell
 curl.exe -fsS http://192.168.1.19:18081/health/live
-curl.exe -fsS http://192.168.1.19:18081/health/ready
+curl.exe -sS -w "\nHTTP %{http_code}\n" http://192.168.1.19:18081/health/ready
 curl.exe -fsS http://192.168.1.19:18081/admin/assets/admin.js
 ```
+
+The readiness status must be `200` while accounts are configured. Accept `503`
+with `{"status":"degraded"}` only when the user intentionally left the account
+pool empty; the live endpoint and Docker health state must still pass.
 
 For rollback, extract `source-before-update.tgz` back into the active source
 directory before pointing `qveris-account-proxy:local` at the rollback tag.
