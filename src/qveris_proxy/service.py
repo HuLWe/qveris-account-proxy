@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from .access_keys import (
@@ -997,6 +997,56 @@ class ProxyService:
     async def refresh_quotas(self) -> list[dict[str, object]]:
         async with self._quota_refresh_lock:
             return await self._refresh_quotas()
+
+    async def aggregate_credits(self, request: Request) -> JSONResponse:
+        access_key_lease = await self.authenticate_proxy(request)
+        try:
+            configured_accounts = len(self.pool.account_ids())
+            if configured_accounts == 0:
+                raise HTTPException(
+                    status_code=503,
+                    detail="no QVeris accounts are configured",
+                    headers={"Retry-After": "1", "Cache-Control": "no-store"},
+                )
+
+            results = await self.refresh_quotas()
+            balances: list[float] = []
+            for result in results:
+                if result.get("http_status") != 200:
+                    continue
+                snapshot = result.get("credits")
+                if not isinstance(snapshot, dict):
+                    continue
+                balance = self._snapshot_credit_balance(snapshot)
+                if balance is not None:
+                    balances.append(max(0.0, balance))
+
+            if not balances:
+                raise HTTPException(
+                    status_code=503,
+                    detail="QVeris credit balances are unavailable",
+                    headers={"Retry-After": "1", "Cache-Control": "no-store"},
+                )
+
+            total = math.fsum(balances)
+            normalized_total: int | float = int(total) if total.is_integer() else total
+            return JSONResponse(
+                {
+                    "status": "success",
+                    "data": {
+                        "remaining_credits": normalized_total,
+                        "total_available_credits": normalized_total,
+                    },
+                    "proxy_pool": {
+                        "configured_accounts": configured_accounts,
+                        "included_accounts": len(balances),
+                        "complete": len(balances) == configured_accounts,
+                    },
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        finally:
+            await access_key_lease.release()
 
     async def test_account(self, account_id: str) -> dict[str, object]:
         configuration_lease = await self._gate.acquire()

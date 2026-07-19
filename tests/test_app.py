@@ -176,9 +176,12 @@ async def test_vibe_style_requests_keep_control_default_without_pinning_tools() 
         path = request.url.path.removeprefix("/api/v1/")
         captured.append((path, request.headers.get("authorization", "")))
         if path == "auth/credits":
+            remaining = (
+                77 if request.headers["authorization"] == f"Bearer {KEY_B1}" else 123
+            )
             return httpx.Response(
                 200,
-                json={"data": {"remaining_credits": 123}},
+                json={"data": {"remaining_credits": remaining}},
             )
         if path == "auth/usage/history/v2":
             return httpx.Response(200, json={"data": {"events": []}})
@@ -223,6 +226,18 @@ async def test_vibe_style_requests_keep_control_default_without_pinning_tools() 
             )
 
     assert credits.status_code == 200
+    assert credits.json() == {
+        "status": "success",
+        "data": {
+            "remaining_credits": 200,
+            "total_available_credits": 200,
+        },
+        "proxy_pool": {
+            "configured_accounts": 2,
+            "included_accounts": 2,
+            "complete": True,
+        },
+    }
     assert usage.status_code == 200
     assert first_search.status_code == 200
     assert second_search.status_code == 200
@@ -231,10 +246,181 @@ async def test_vibe_style_requests_keep_control_default_without_pinning_tools() 
     assert second_search.headers["x-qveris-proxy-account"] == "account-b"
     assert explicit.headers["x-qveris-proxy-account"] == "account-b"
     assert captured[0] == ("auth/credits", f"Bearer {KEY_A1}")
-    assert captured[1] == ("auth/usage/history/v2", f"Bearer {OAUTH_A1}")
-    assert captured[2][0] == "search"
+    assert captured[1] == ("auth/credits", f"Bearer {KEY_B1}")
+    assert captured[2] == ("auth/usage/history/v2", f"Bearer {OAUTH_A1}")
     assert captured[3][0] == "search"
-    assert captured[4] == ("tools/execute", f"Bearer {KEY_B1}")
+    assert captured[4][0] == "search"
+    assert captured[5] == ("tools/execute", f"Bearer {KEY_B1}")
+
+
+@pytest.mark.asyncio
+async def test_credit_summary_keeps_official_fields_and_consumes_proxy_key_once() -> (
+    None
+):
+    captured: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers["authorization"]
+        captured.append(authorization)
+        if authorization == f"Bearer {KEY_B1}":
+            return httpx.Response(
+                200,
+                json={"data": {"total_available_credits": 8}},
+            )
+        return httpx.Response(
+            200,
+            json={"data": {"remaining_credits": "12.5"}},
+        )
+
+    app = create_app(
+        make_settings(multiple_accounts=True, routing_mode="round_robin"),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+        ) as client:
+            response = await client.get(
+                "/api/v1/auth/credits",
+                headers=auth_headers(account=None),
+            )
+        proxy_key = (await app.state.proxy_service.proxy_access_keys.list())[0]
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-qveris-api-version"] == QVERIS_API_VERSION
+    assert "x-qveris-proxy-account" not in response.headers
+    assert response.json() == {
+        "status": "success",
+        "data": {
+            "remaining_credits": 20.5,
+            "total_available_credits": 20.5,
+        },
+        "proxy_pool": {
+            "configured_accounts": 2,
+            "included_accounts": 2,
+            "complete": True,
+        },
+    }
+    assert "account-a" not in response.text
+    assert "account-b" not in response.text
+    assert KEY_A1 not in response.text
+    assert KEY_B1 not in response.text
+    assert captured == [f"Bearer {KEY_A1}", f"Bearer {KEY_B1}"]
+    assert proxy_key.requests_used == 1
+    assert proxy_key.active_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_credit_summary_uses_available_accounts_and_keeps_explicit_routing() -> (
+    None
+):
+    captured: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers["authorization"]
+        captured.append(authorization)
+        if authorization == f"Bearer {KEY_B1}":
+            return httpx.Response(
+                200,
+                json={"data": {"remaining_credits": 8}, "provider": "fixture"},
+            )
+        return httpx.Response(503, json={"detail": "temporarily unavailable"})
+
+    app = create_app(
+        make_settings(multiple_accounts=True, routing_mode="round_robin"),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+        ) as client:
+            summary = await client.get(
+                "/api/v1/auth/credits",
+                headers=auth_headers(account=None),
+            )
+            explicit = await client.get(
+                "/api/v1/auth/credits",
+                headers=auth_headers(account="account-b"),
+            )
+
+    assert summary.status_code == 200
+    assert summary.json()["data"] == {
+        "remaining_credits": 8,
+        "total_available_credits": 8,
+    }
+    assert summary.json()["proxy_pool"] == {
+        "configured_accounts": 2,
+        "included_accounts": 1,
+        "complete": False,
+    }
+    assert explicit.status_code == 200
+    assert explicit.headers["x-qveris-proxy-account"] == "account-b"
+    assert explicit.json() == {
+        "data": {"remaining_credits": 8},
+        "provider": "fixture",
+    }
+    assert captured == [
+        f"Bearer {KEY_A1}",
+        f"Bearer {KEY_B1}",
+        f"Bearer {KEY_B1}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_credit_summary_returns_503_when_no_balance_is_available() -> None:
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.headers["authorization"] == f"Bearer {KEY_B1}":
+            return httpx.Response(200, json={"data": {"plan": "fixture"}})
+        return httpx.Response(503)
+
+    app = create_app(
+        make_settings(multiple_accounts=True, routing_mode="round_robin"),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+        ) as client:
+            response = await client.get(
+                "/api/v1/auth/credits",
+                headers=auth_headers(account=None),
+            )
+        proxy_key = (await app.state.proxy_service.proxy_access_keys.list())[0]
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["retry-after"] == "1"
+    assert response.json() == {"detail": "QVeris credit balances are unavailable"}
+    assert proxy_key.requests_used == 1
+    assert proxy_key.active_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_credit_summary_preserves_explicit_mode_routing() -> None:
+    calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"data": {"remaining_credits": 10}})
+
+    app = create_app(
+        make_settings(multiple_accounts=True, routing_mode="explicit"),
+        transport=httpx.MockTransport(upstream),
+    )
+    response = await request_app(
+        app,
+        "GET",
+        "/api/v1/auth/credits",
+        headers=auth_headers(account=None),
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "X-QVeris-Account is required for this request"
+    }
+    assert calls == 0
 
 
 @pytest.mark.asyncio

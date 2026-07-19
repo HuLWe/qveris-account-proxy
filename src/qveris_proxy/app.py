@@ -481,7 +481,14 @@ def create_app(
                     headers={"Allow": ", ".join(methods)},
                 )
             raise HTTPException(status_code=404, detail="unknown QVeris API route")
-        return await request.app.state.proxy_service.forward(request, operation)
+        service = request.app.state.proxy_service
+        if (
+            operation.route_id == "auth/credits"
+            and service.settings.routing_mode == "round_robin"
+            and request.headers.get("x-qveris-account") is None
+        ):
+            return await service.aggregate_credits(request)
+        return await service.forward(request, operation)
 
     return application
 
