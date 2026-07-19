@@ -67,7 +67,8 @@ button:hover:not(:disabled) {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+.connection-value code:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 1px;
 }
@@ -470,6 +471,7 @@ main {
   font-size: 13px;
   line-height: 18px;
   white-space: nowrap;
+  user-select: all;
 }
 
 .connection-key-actions,

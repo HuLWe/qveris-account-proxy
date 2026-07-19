@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -28,6 +30,22 @@ from conftest import (
     OAUTH_A1,
     make_settings,
 )
+
+
+def test_admin_copy_behavior() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the admin clipboard behavior test")
+
+    test_file = Path(__file__).with_name("admin_copy_behavior.cjs")
+    result = subprocess.run(
+        [node, str(test_file)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def auth_headers() -> dict[str, str]:
@@ -134,7 +152,12 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b'cleanUrl.searchParams.delete("launch")' in script.content
     assert b"resetWorkspace" in script.content
     assert b"window.navigator.clipboard.writeText" in script.content
+    assert b"window.isSecureContext" in script.content
+    assert b"copyTextWithSelection" in script.content
+    assert b'field.focus({ preventScroll: true })' in script.content
     assert b'document.execCommand("copy")' in script.content
+    assert b"selectElementText" in script.content
+    assert b"range.selectNodeContents(element)" in script.content
     assert b"innerHTML" not in script.content
     assert b"eval(" not in script.content
     assert b"https://qveris.ai/?ref=afAfj_c90cnWYg" in shell.content
@@ -145,6 +168,7 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b'class="onboarding-actions"' in shell.content
     assert b'id="copy-api-key"' in shell.content
     assert b'id="api-key-display"' in shell.content
+    assert b'tabindex="0"' in shell.content
     assert b'id="toggle-api-key"' in shell.content
     assert b'id="api-base-url"' in shell.content
     assert b'id="copy-base-url"' in shell.content
@@ -204,6 +228,7 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b".onboarding-actions" in stylesheet.content
     assert b".registration-link-secondary" in stylesheet.content
     assert b".account-editor.edit-target" in stylesheet.content
+    assert b".connection-value code:focus-visible" in stylesheet.content
     assert calls == 0
 
 

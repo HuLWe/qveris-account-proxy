@@ -66,19 +66,8 @@ function clearSessionToken() {
   }
 }
 
-async function copyText(text) {
-  if (
-    window.navigator.clipboard &&
-    typeof window.navigator.clipboard.writeText === "function"
-  ) {
-    try {
-      await window.navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fall through for HTTP origins and browsers without clipboard permission.
-    }
-  }
-
+function copyTextWithSelection(text) {
+  const activeElement = document.activeElement;
   const field = document.createElement("textarea");
   field.value = text;
   field.setAttribute("readonly", "");
@@ -90,6 +79,7 @@ async function copyText(text) {
   field.style.height = "1px";
   field.style.opacity = "0";
   document.body.append(field);
+  field.focus({ preventScroll: true });
   field.select();
   field.setSelectionRange(0, field.value.length);
   try {
@@ -98,7 +88,44 @@ async function copyText(text) {
     return false;
   } finally {
     field.remove();
+    if (activeElement && typeof activeElement.focus === "function") {
+      activeElement.focus({ preventScroll: true });
+    }
   }
+}
+
+async function copyText(text) {
+  if (
+    window.isSecureContext &&
+    window.navigator.clipboard &&
+    typeof window.navigator.clipboard.writeText === "function"
+  ) {
+    try {
+      await window.navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through for HTTP origins and browsers without clipboard permission.
+    }
+  }
+  return copyTextWithSelection(text);
+}
+
+function selectElementText(element) {
+  if (
+    typeof window.getSelection !== "function" ||
+    typeof document.createRange !== "function"
+  ) {
+    return false;
+  }
+  const selection = window.getSelection();
+  if (!selection) {
+    return false;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
 }
 
 async function copyApiKey() {
@@ -107,7 +134,13 @@ async function copyApiKey() {
     return;
   }
   const copied = await copyText(state.token);
-  showToast(copied ? "API Key 已复制" : "复制失败，请检查剪贴板权限", !copied);
+  if (!copied) {
+    setApiKeyVisibility(true);
+    const display = byId("api-key-display");
+    display.focus({ preventScroll: true });
+    selectElementText(display);
+  }
+  showToast(copied ? "API Key 已复制" : "复制失败，请直接选择已显示的 API Key", !copied);
 }
 
 function apiBaseUrl() {
