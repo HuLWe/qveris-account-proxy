@@ -132,13 +132,20 @@ async def test_proxy_key_admin_crud_returns_secret_only_when_created(
                 headers=admin_headers(),
                 json={"enabled": False},
             )
-            protected = await client.delete(
+            deleted_primary = await client.delete(
                 "/admin/v1/proxy-keys/primary", headers=admin_headers()
             )
             assert empty_update.status_code == 400
             assert missing.status_code == 404
-            assert protected.status_code == 409
-            assert protected.json()["detail"] == "primary_proxy_access_key_required"
+            assert deleted_primary.status_code == 200
+            assert deleted_primary.json() == {"deleted": "primary"}
+
+            primary_request = await client.post(
+                "/api/v1/search",
+                headers=proxy_headers(ACCESS_TOKEN),
+                json={"query": "primary has been revoked"},
+            )
+            assert primary_request.status_code == 401
 
             deleted = await client.delete(
                 f"/admin/v1/proxy-keys/{key['id']}", headers=admin_headers()
@@ -149,13 +156,7 @@ async def test_proxy_key_admin_crud_returns_secret_only_when_created(
             remaining = await client.get(
                 "/admin/v1/proxy-keys", headers=admin_headers()
             )
-            primary_request = await client.post(
-                "/api/v1/search",
-                headers=proxy_headers(ACCESS_TOKEN),
-                json={"query": "primary remains active"},
-            )
-            assert [item["id"] for item in remaining.json()["keys"]] == ["primary"]
-            assert primary_request.status_code == 200
+            assert remaining.json()["keys"] == []
 
     restarted = create_app(
         make_settings(state_path=str(state_path)),
@@ -174,12 +175,54 @@ async def test_proxy_key_admin_crud_returns_secret_only_when_created(
                 headers=proxy_headers(ACCESS_TOKEN),
                 json={"query": "primary survives restart"},
             )
-            assert [item["id"] for item in remaining.json()["keys"]] == ["primary"]
-            assert primary_request.status_code == 200
+            assert remaining.json()["keys"] == []
+            assert primary_request.status_code == 401
 
     database_bytes = state_path.read_bytes()
     assert secret.encode() not in database_bytes
     assert ACCESS_TOKEN.encode() not in database_bytes
+
+
+@pytest.mark.asyncio
+async def test_proxy_key_ping_validates_without_consuming_usage(tmp_path: Path) -> None:
+    upstream_calls = 0
+
+    async def upstream(_: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(
+        make_settings(state_path=str(tmp_path / "ping.db")),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://proxy.test",
+        ) as client:
+            key, secret = await create_managed_key(client)
+            valid = await client.get(
+                "/api/v1/ping",
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+            invalid = await client.get(
+                "/api/v1/ping",
+                headers={"Authorization": "Bearer invalid"},
+            )
+            listed = await client.get(
+                "/admin/v1/proxy-keys", headers=admin_headers()
+            )
+
+    assert valid.status_code == 200
+    assert valid.json() == {
+        "status": "ok",
+        "key": {"id": key["id"], "kind": "managed", "name": "Desktop client"},
+    }
+    assert invalid.status_code == 401
+    stored = next(item for item in listed.json()["keys"] if item["id"] == key["id"])
+    assert stored["requests_used"] == 0
+    assert upstream_calls == 0
 
 
 @pytest.mark.asyncio

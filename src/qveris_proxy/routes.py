@@ -16,6 +16,7 @@ class Operation:
     proxy_auth: bool = True
     auto_route: bool = False
     credit_sensitive: bool = False
+    same_request_failover: bool = False
 
     @property
     def provider_auth(self) -> bool:
@@ -98,6 +99,10 @@ def resolve_operation(method: str, path: str) -> Operation | None:
                 "tools/execute",
             },
             credit_sensitive=path in {"search", "tools/execute"},
+            same_request_failover=(
+                normalized_method == "GET"
+                and path in {"providers", "providers/categories"}
+            ),
         )
 
     if normalized_method == "GET" and _LEDGER_ENTRY.fullmatch(path):
@@ -145,6 +150,7 @@ def public_operation_catalog() -> list[dict[str, object]]:
                 "credential_kind": operation.credential_kind,
                 "auto_route": operation.auto_route,
                 "credit_sensitive": operation.credit_sensitive,
+                "same_request_failover": operation.same_request_failover,
             }
         )
     return catalog

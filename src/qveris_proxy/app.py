@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .access_keys import (
-    PrimaryProxyAccessKeyRequired,
     PROXY_ACCESS_KEY_CONCURRENCY_MAX,
     PROXY_ACCESS_KEY_EXPIRES_AT_MAX,
     PROXY_ACCESS_KEY_NAME_MAX_LENGTH,
@@ -201,6 +200,7 @@ def create_app(
         return {
             "accounts": await service.account_status(),
             "credential_reload": asdict(await service.credential_reload_status()),
+            "quota_pool": await service.quota_pool_status(),
         }
 
     @application.get("/admin/v1/proxy-keys", include_in_schema=False)
@@ -259,7 +259,7 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         try:
             await service.proxy_access_keys.delete(key_id)
-        except (ProxyAccessKeyNotFound, PrimaryProxyAccessKeyRequired) as exc:
+        except ProxyAccessKeyNotFound as exc:
             _raise_proxy_key_exception(exc)
         return {"deleted": key_id}
 
@@ -452,7 +452,8 @@ def create_app(
         service = request.app.state.proxy_service
         service.authenticate(request)
         response.headers["Cache-Control"] = "no-store"
-        return {"accounts": await service.refresh_quotas()}
+        accounts = await service.refresh_quotas()
+        return {"accounts": accounts, "quota_pool": await service.quota_pool_status()}
 
     @application.post("/admin/v1/reload-accounts", include_in_schema=False)
     async def reload_accounts(
@@ -468,6 +469,13 @@ def create_app(
                 detail=f"credential reload failed: {result.error}",
             )
         return {"reload": asdict(result)}
+
+    @application.get("/api/v1/ping", include_in_schema=False)
+    async def proxy_key_ping(
+        request: Request, response: Response
+    ) -> dict[str, object]:
+        response.headers["Cache-Control"] = "no-store"
+        return await request.app.state.proxy_service.test_proxy_key(request)
 
     @application.api_route("/api/v1/{api_path:path}", methods=["GET", "POST"])
     async def qveris_api(api_path: str, request: Request):
@@ -556,15 +564,12 @@ async def _read_proxy_key_payload(request: Request, model: type[_ModelT]) -> _Mo
 def _raise_proxy_key_exception(exc: Exception) -> None:
     if isinstance(exc, ProxyAccessKeyNotFound):
         _raise_proxy_key_error(exc.code)
-    if isinstance(exc, PrimaryProxyAccessKeyRequired):
-        _raise_proxy_key_error(exc.code)
     _raise_proxy_key_error("invalid_proxy_access_key")
 
 
 def _raise_proxy_key_error(code: str) -> None:
     status_code = {
         ProxyAccessKeyNotFound.code: 404,
-        PrimaryProxyAccessKeyRequired.code: 409,
         "empty_proxy_access_key_update": 400,
         "invalid_proxy_access_key": 400,
     }.get(code, 400)

@@ -142,6 +142,52 @@ async def test_daily_email_login_and_session_touch(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_daily_checkin_can_be_disabled_per_account(tmp_path: Path) -> None:
+    account = make_account(tmp_path, daily_touch_time=time(6)).model_copy(
+        update={"daily_checkin_enabled": False}
+    )
+    browser = FakeAccountBrowser(
+        probes=[SessionObservation("authenticated", 200, 200)]
+    )
+    clock = MutableClock(NOW)
+    service = KeeperService(
+        make_settings(tmp_path, (account,)),
+        runtime=FakeBrowserRuntime({account.id: browser}),
+        wall_time=clock,
+    )
+    await service.start()
+
+    clock.value = datetime(2026, 1, 2, 6, tzinfo=timezone.utc).timestamp()
+    await service.run_due(clock.value)
+
+    assert browser.login_calls == 0
+    assert browser.touch_calls == 0
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_daily_checkin_marks_successful_login(tmp_path: Path) -> None:
+    account = make_account(tmp_path, daily_touch_time=time(23, 59))
+    browser = FakeAccountBrowser(
+        probes=[SessionObservation("authenticated", 200, 200)],
+        touches=[SessionObservation("authenticated", 200, 200)],
+    )
+    clock = MutableClock(NOW)
+    service = KeeperService(
+        make_settings(tmp_path, (account,)),
+        runtime=FakeBrowserRuntime({account.id: browser}),
+        wall_time=clock,
+    )
+    await service.start()
+
+    clock.value = datetime(2026, 1, 2, 23, 59, tzinfo=timezone.utc).timestamp()
+    await service.run_due(clock.value)
+
+    assert service.account_status()[0]["reason"] == "daily_checkin_claimed"
+    await service.close()
+
+
+@pytest.mark.asyncio
 async def test_startup_login_is_not_repeated_by_daily_scheduler(
     tmp_path: Path,
 ) -> None:

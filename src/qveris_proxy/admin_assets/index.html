@@ -36,11 +36,12 @@
       <section class="locked-state" id="locked-state">
         <div class="locked-symbol" aria-hidden="true">•••</div>
         <h1>管理页未连接</h1>
-        <p>重新运行启动脚本即可自动连接</p>
+        <p>首次启动后的第一个浏览器会自动连接；其他浏览器可重新运行启动脚本。</p>
         <details class="manual-connect" id="manual-connect">
           <summary>手动连接</summary>
+          <p class="manual-connect-help">这里填写启动脚本显示的<strong>管理登录令牌</strong>，不是 QVeris 控制台 API Key。登录后在“代理 Key”中点击“创建 Key”获取给应用调用的代理 API Key；完整 Key 只显示一次，请立即复制保存。</p>
           <form class="manual-auth" id="auth-form">
-            <label for="access-token">代理 API Key</label>
+            <label for="access-token">管理登录令牌</label>
             <div class="manual-key-row">
               <input
                 id="access-token"
@@ -48,10 +49,10 @@
                 type="password"
                 autocomplete="off"
                 spellcheck="false"
-                placeholder="粘贴终端命令显示的代理 API Key"
+                placeholder="粘贴启动脚本显示的管理登录令牌"
                 required
               >
-              <button type="button" class="secondary" id="toggle-manual-key" aria-label="显示代理 API Key 输入值" aria-pressed="false">显示</button>
+              <button type="button" class="secondary" id="toggle-manual-key" aria-label="显示管理登录令牌输入值" aria-pressed="false">显示</button>
               <button type="submit">连接</button>
             </div>
           </form>
@@ -76,6 +77,7 @@
             </div>
             <div class="actions">
               <button type="button" class="secondary" id="test-gateway">网关测试</button>
+              <button type="button" class="secondary" id="refresh-credits">立即刷新额度</button>
               <button type="button" class="secondary" id="reload-accounts">重载配置</button>
               <button type="button" id="refresh-status">刷新状态</button>
             </div>
@@ -96,17 +98,19 @@
                 <button type="button" class="secondary" id="copy-base-url" aria-label="复制 API Base URL">复制</button>
               </div>
               <div class="connection-value">
-                <span>代理 API Key</span>
+                <span id="api-key-label">默认代理 API Key</span>
                 <code id="api-key-display" aria-label="代理 API Key" tabindex="0"></code>
                 <div class="connection-key-actions">
                   <button type="button" class="secondary" id="toggle-api-key" aria-label="显示代理 API Key" aria-pressed="false">显示</button>
                   <button type="button" class="secondary" id="copy-api-key" aria-label="复制代理 API Key">复制</button>
                 </div>
+                <span class="connection-note" id="api-key-note"></span>
               </div>
             </div>
           </section>
 
           <div class="metrics" id="metrics"></div>
+          <div class="status-strip" id="quota-pool-state"></div>
           <div class="status-strip" id="reload-state"></div>
 
           <div class="table-wrap">
@@ -135,6 +139,7 @@
             </div>
             <div class="actions">
               <button type="button" class="secondary" id="refresh-proxy-keys">刷新</button>
+              <button type="button" class="secondary" id="test-proxy-key">测试 Key</button>
               <button type="button" id="create-proxy-key">创建 Key</button>
             </div>
           </div>
@@ -286,6 +291,27 @@
       <div class="dialog-actions">
         <button type="button" id="close-proxy-key-secret">完成</button>
       </div>
+    </dialog>
+
+    <dialog class="key-dialog" id="proxy-key-test-dialog">
+      <form id="proxy-key-test-form" novalidate>
+        <div class="dialog-heading">
+          <div>
+            <h2>测试代理 API Key</h2>
+            <p id="proxy-key-test-description">验证 Key 的代理访问资格，不会转发上游请求或计入用量。</p>
+          </div>
+          <button type="button" class="secondary icon-button" id="close-proxy-key-test" aria-label="关闭">×</button>
+        </div>
+        <label class="key-form-wide">
+          代理 API Key
+          <input id="proxy-key-test-value" type="password" autocomplete="off" spellcheck="false" required>
+        </label>
+        <div class="status-strip" id="proxy-key-test-result" hidden></div>
+        <div class="dialog-actions">
+          <button type="button" class="secondary" id="cancel-proxy-key-test">取消</button>
+          <button type="submit" id="submit-proxy-key-test">开始测试</button>
+        </div>
+      </form>
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

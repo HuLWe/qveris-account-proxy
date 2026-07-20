@@ -159,7 +159,7 @@ class ProxySettings(BaseModel):
         default=2 * 1024 * 1024, ge=1024, le=16 * 1024 * 1024
     )
     quota_refresh_interval_seconds: float = Field(
-        default=15 * 60, ge=0, le=24 * 60 * 60
+        default=60, ge=0, le=24 * 60 * 60
     )
     accounts_reload_interval_seconds: float = Field(default=30.0, ge=0, le=3600)
     accounts_file_path: str | None = Field(default=None, exclude=True)
@@ -314,7 +314,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> ProxySettings:
             env, "QVP_AFFINITY_CAPTURE_BYTES", 2 * 1024 * 1024
         ),
         "quota_refresh_interval_seconds": _env_float(
-            env, "QVP_QUOTA_REFRESH_INTERVAL_SECONDS", 15 * 60
+            env, "QVP_QUOTA_REFRESH_INTERVAL_SECONDS", 60
         ),
         "accounts_reload_interval_seconds": _env_float(
             env, "QVP_ACCOUNTS_RELOAD_INTERVAL_SECONDS", 30.0

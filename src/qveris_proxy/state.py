@@ -53,6 +53,9 @@ class StateStore:
         self._connection.execute("PRAGMA busy_timeout=5000")
         self._initialize()
 
+    def now(self) -> float:
+        return self._wall_time()
+
     def _initialize(self) -> None:
         if self._path != ":memory:":
             self._connection.execute("PRAGMA journal_mode=WAL")
@@ -124,6 +127,11 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_proxy_access_keys_created
                 ON proxy_access_keys(created_at, id);
+
+            CREATE TABLE IF NOT EXISTS proxy_access_key_bootstrap (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                primary_initialized_at REAL NOT NULL
+            );
             """
         )
         cooldown_columns = {
@@ -208,7 +216,7 @@ class StateStore:
         prefix: str,
         suffix: str,
         max_concurrency: int,
-    ) -> ProxyAccessKeyRecord:
+    ) -> ProxyAccessKeyRecord | None:
         if not self._valid_secret_hash(secret_hash):
             raise ValueError("invalid proxy access key hash")
         now = self._wall_time()
@@ -220,6 +228,12 @@ class StateStore:
                         "FROM proxy_access_keys WHERE id = 'primary'"
                     ).fetchone()
                     if row is None:
+                        bootstrap = self._connection.execute(
+                            "SELECT singleton FROM proxy_access_key_bootstrap "
+                            "WHERE singleton = 1"
+                        ).fetchone()
+                        if bootstrap is not None:
+                            return None
                         self._connection.execute(
                             """
                             INSERT INTO proxy_access_keys(
@@ -243,21 +257,34 @@ class StateStore:
                                 now,
                             ),
                         )
-                    elif (
-                        str(row["kind"]) != "primary"
-                        or str(row["secret_hash"]) != secret_hash
-                        or str(row["prefix"]) != prefix
-                        or str(row["suffix"]) != suffix
-                    ):
                         self._connection.execute(
-                            """
-                            UPDATE proxy_access_keys
-                            SET kind = 'primary', secret_hash = ?, prefix = ?,
-                                suffix = ?, updated_at = ?
-                            WHERE id = 'primary'
-                            """,
-                            (secret_hash, prefix, suffix, now),
+                            "INSERT INTO proxy_access_key_bootstrap("
+                            "singleton, primary_initialized_at"
+                            ") VALUES (1, ?)",
+                            (now,),
                         )
+                    else:
+                        self._connection.execute(
+                            "INSERT OR IGNORE INTO proxy_access_key_bootstrap("
+                            "singleton, primary_initialized_at"
+                            ") VALUES (1, ?)",
+                            (now,),
+                        )
+                        if (
+                            str(row["kind"]) != "primary"
+                            or str(row["secret_hash"]) != secret_hash
+                            or str(row["prefix"]) != prefix
+                            or str(row["suffix"]) != suffix
+                        ):
+                            self._connection.execute(
+                                """
+                                UPDATE proxy_access_keys
+                                SET kind = 'primary', secret_hash = ?, prefix = ?,
+                                    suffix = ?, updated_at = ?
+                                WHERE id = 'primary'
+                                """,
+                                (secret_hash, prefix, suffix, now),
+                            )
                     current = self._connection.execute(
                         f"SELECT {_PROXY_ACCESS_KEY_COLUMNS} "
                         "FROM proxy_access_keys WHERE id = 'primary'"
@@ -442,7 +469,7 @@ class StateStore:
     async def delete_proxy_access_key(self, key_id: str) -> bool:
         async with self._lock:
             cursor = self._connection.execute(
-                "DELETE FROM proxy_access_keys WHERE id = ? AND kind <> 'primary'",
+                "DELETE FROM proxy_access_keys WHERE id = ?",
                 (key_id,),
             )
             self._connection.commit()

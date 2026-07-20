@@ -20,6 +20,7 @@
       },
       "user_agent": "STABLE_USER_AGENT_ACCOUNT_A",
       "headless": true,
+      "daily_checkin_enabled": true,
       "daily_touch_time": "06:30:00"
     },
     {
@@ -39,6 +40,7 @@
       },
       "user_agent": "STABLE_USER_AGENT_ACCOUNT_B",
       "headless": true,
+      "daily_checkin_enabled": true,
       "daily_touch_time": "06:30:00"
     }
   ]

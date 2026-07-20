@@ -625,7 +625,7 @@ try {
         Write-Host "管理页已自动连接；可在“运行状态”的“接入应用”区域显示或复制代理 API Key。"
     }
     else {
-        Write-Host "自动连接链接生成失败。请运行下面的命令显示代理 API Key，再在管理页展开“手动连接”：" -ForegroundColor Yellow
+        Write-Host "自动连接链接生成失败。请运行下面的命令显示管理登录令牌，再在管理页展开“手动连接”：" -ForegroundColor Yellow
         Write-Host ("docker run --rm --user 10001:10001 --mount type=volume,source={0},target=/run/secrets --entrypoint cat {1} /run/secrets/proxy_access_token" -f $secretsVolume, $ImageName)
     }
     if (-not $opened) {

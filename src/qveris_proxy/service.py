@@ -489,24 +489,46 @@ class ProxyService:
         try:
             return await self.proxy_access_keys.acquire(candidate)
         except ProxyAccessKeyRejected as exc:
-            if exc.reason in {"invalid", "disabled", "expired"}:
-                self._raise_proxy_authentication_required()
-            detail = {
-                "request_limit": "proxy API key usage limit reached",
-                "rate_limit": "proxy API key rate limit reached",
-                "concurrency": "proxy API key concurrency limit reached",
-            }[exc.reason]
-            headers = (
-                {"Retry-After": str(exc.retry_after)}
-                if exc.retry_after is not None
-                else None
-            )
-            raise HTTPException(
-                status_code=429,
-                detail=detail,
-                headers=headers,
-            ) from None
+            self._raise_proxy_access_key_rejected(exc)
         raise AssertionError("unreachable")
+
+    async def test_proxy_key(self, request: Request) -> dict[str, object]:
+        raw = request.headers.get("authorization", "")
+        scheme, separator, candidate = raw.partition(" ")
+        if separator != " " or scheme.lower() != "bearer" or not candidate:
+            self._raise_proxy_authentication_required()
+        try:
+            key = await self.proxy_access_keys.inspect(candidate)
+        except ProxyAccessKeyRejected as exc:
+            self._raise_proxy_access_key_rejected(exc)
+        return {
+            "status": "ok",
+            "key": {
+                "id": key.id,
+                "kind": key.kind,
+                "name": key.name,
+            },
+        }
+
+    @classmethod
+    def _raise_proxy_access_key_rejected(cls, exc: ProxyAccessKeyRejected) -> None:
+        if exc.reason in {"invalid", "disabled", "expired"}:
+            cls._raise_proxy_authentication_required()
+        detail = {
+            "request_limit": "proxy API key usage limit reached",
+            "rate_limit": "proxy API key rate limit reached",
+            "concurrency": "proxy API key concurrency limit reached",
+        }[exc.reason]
+        headers = (
+            {"Retry-After": str(exc.retry_after)}
+            if exc.retry_after is not None
+            else None
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=detail,
+            headers=headers,
+        )
 
     @staticmethod
     def _raise_proxy_authentication_required() -> None:
@@ -558,6 +580,8 @@ class ProxyService:
         lease: KeyLease | None = None
         transport_lease: AccountClientLease | None = None
         account_id: str | None = None
+        explicit_account: str | None = None
+        affinity_account: str | None = None
         response: httpx.Response | None = None
         try:
             try:
@@ -649,13 +673,6 @@ class ProxyService:
                     headers=headers,
                 ) from None
 
-            if account_id is not None:
-                await self.state.set_affinities(
-                    affinity_values,
-                    account_id,
-                    self.settings.affinity_ttl_seconds,
-                )
-
             affinity_ttl_seconds = self.settings.affinity_ttl_seconds
             affinity_capture_bytes = self.settings.affinity_capture_bytes
 
@@ -685,6 +702,63 @@ class ProxyService:
                     response.status_code,
                     {name.lower(): value for name, value in response.headers.items()},
                     expected_pool=request_pool,
+                )
+
+            failover_allowed = (
+                operation.same_request_failover
+                and explicit_account is None
+                and affinity_account is None
+                and self.settings.routing_mode == "round_robin"
+                and response.status_code in {401, 402, 403, 429, 500, 502, 503, 504}
+            )
+            if failover_allowed and lease is not None:
+                attempted_account = lease.account_id
+                try:
+                    retry_lease = await request_pool.acquire_any(
+                        operation.route_id,
+                        operation.credential_kind,
+                        credit_sensitive=operation.credit_sensitive,
+                    )
+                except PoolUnavailable:
+                    retry_lease = None
+                if retry_lease is not None:
+                    if retry_lease.account_id == attempted_account:
+                        await retry_lease.release()
+                    else:
+                        await response.aclose()
+                        await transport_lease.release()
+                        await lease.release()
+                        lease = retry_lease
+                        account_id = retry_lease.account_id
+                        transport_lease = await self.transports.acquire(account_id)
+                        upstream_client = transport_lease.client
+                        upstream_request = upstream_client.build_request(
+                            request.method,
+                            url,
+                            headers=build_upstream_headers(
+                                request.headers, retry_lease.bearer_token
+                            ),
+                            content=body if body else None,
+                        )
+                        response = await upstream_client.send(
+                            upstream_request, stream=True
+                        )
+                        await self._report_response(
+                            retry_lease,
+                            response.status_code,
+                            {
+                                name.lower(): value
+                                for name, value in response.headers.items()
+                            },
+                            expected_pool=request_pool,
+                        )
+                        response_headers = build_downstream_headers(response.headers)
+
+            if account_id is not None:
+                await self.state.set_affinities(
+                    affinity_values,
+                    account_id,
+                    self.settings.affinity_ttl_seconds,
                 )
             await configuration_lease.release()
 
@@ -998,49 +1072,99 @@ class ProxyService:
         async with self._quota_refresh_lock:
             return await self._refresh_quotas()
 
+    async def quota_pool_status(
+        self, *, refresh_expired: bool = False
+    ) -> dict[str, object]:
+        account_ids = self.pool.account_ids()
+        configured_accounts = len(account_ids)
+        snapshots = await self.state.quota_snapshots()
+        if refresh_expired and account_ids:
+            now = self.state.now()
+            refresh_interval = self.settings.quota_refresh_interval_seconds
+            accounts_to_refresh = tuple(
+                account_id
+                for account_id in account_ids
+                if (
+                    account_id not in snapshots
+                    or refresh_interval == 0
+                    or now - float(snapshots[account_id]["checked_at"])
+                    >= refresh_interval
+                )
+            )
+            if accounts_to_refresh:
+                await self._refresh_quotas_for_accounts(accounts_to_refresh)
+                snapshots = await self.state.quota_snapshots()
+
+        balances: list[float] = []
+        stale = False
+        snapshot_times: list[float] = []
+        for account_id in account_ids:
+            result = snapshots.get(account_id)
+            if result is None:
+                continue
+            snapshot = result.get("credits")
+            if not isinstance(snapshot, dict):
+                continue
+            balance = self._snapshot_credit_balance(snapshot)
+            last_success_at = result.get("last_success_at")
+            if balance is None or not isinstance(last_success_at, (int, float)):
+                continue
+            balances.append(max(0.0, balance))
+            snapshot_times.append(float(last_success_at))
+            stale = stale or bool(result.get("stale"))
+
+        total: int | float | None = None
+        if balances:
+            summed = math.fsum(balances)
+            total = int(summed) if summed.is_integer() else summed
+        partial = bool(configured_accounts) and (
+            len(balances) != configured_accounts or stale
+        )
+        return {
+            "total_available_credits": total,
+            "configured_accounts": configured_accounts,
+            "included_accounts": len(balances),
+            "complete": bool(configured_accounts) and not partial,
+            "partial": partial,
+            "stale": stale,
+            "snapshot_at": max(snapshot_times) if snapshot_times else None,
+            "refresh_interval_seconds": self.settings.quota_refresh_interval_seconds,
+        }
+
     async def aggregate_credits(self, request: Request) -> JSONResponse:
         access_key_lease = await self.authenticate_proxy(request)
         try:
-            configured_accounts = len(self.pool.account_ids())
-            if configured_accounts == 0:
+            pool = await self.quota_pool_status(refresh_expired=True)
+            if pool["configured_accounts"] == 0:
                 raise HTTPException(
                     status_code=503,
                     detail="no QVeris accounts are configured",
                     headers={"Retry-After": "1", "Cache-Control": "no-store"},
                 )
-
-            results = await self.refresh_quotas()
-            balances: list[float] = []
-            for result in results:
-                if result.get("http_status") != 200:
-                    continue
-                snapshot = result.get("credits")
-                if not isinstance(snapshot, dict):
-                    continue
-                balance = self._snapshot_credit_balance(snapshot)
-                if balance is not None:
-                    balances.append(max(0.0, balance))
-
-            if not balances:
+            total = pool["total_available_credits"]
+            if total is None:
                 raise HTTPException(
                     status_code=503,
                     detail="QVeris credit balances are unavailable",
                     headers={"Retry-After": "1", "Cache-Control": "no-store"},
                 )
-
-            total = math.fsum(balances)
-            normalized_total: int | float = int(total) if total.is_integer() else total
             return JSONResponse(
                 {
                     "status": "success",
                     "data": {
-                        "remaining_credits": normalized_total,
-                        "total_available_credits": normalized_total,
+                        "remaining_credits": total,
+                        "total_available_credits": total,
                     },
                     "proxy_pool": {
-                        "configured_accounts": configured_accounts,
-                        "included_accounts": len(balances),
-                        "complete": len(balances) == configured_accounts,
+                        field: pool[field]
+                        for field in (
+                            "configured_accounts",
+                            "included_accounts",
+                            "complete",
+                            "partial",
+                            "stale",
+                            "snapshot_at",
+                        )
                     },
                 },
                 headers={"Cache-Control": "no-store"},
@@ -1211,6 +1335,12 @@ class ProxyService:
         finally:
             await configuration_lease.release()
         return await self._refresh_quotas_current_generation(account_ids)
+
+    async def _refresh_quotas_for_accounts(
+        self, account_ids: tuple[str, ...]
+    ) -> list[dict[str, object]]:
+        async with self._quota_refresh_lock:
+            return await self._refresh_quotas_current_generation(account_ids)
 
     async def _refresh_quotas_current_generation(
         self, account_ids: tuple[str, ...]

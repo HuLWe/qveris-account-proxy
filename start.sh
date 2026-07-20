@@ -546,7 +546,7 @@ fi
 if [[ "$auto_connect" == true ]]; then
   printf '管理页已自动连接；可在“运行状态”的“接入应用”区域显示或复制代理 API Key。\n'
 else
-  printf '自动连接链接生成失败。请运行下面的命令显示代理 API Key，再在管理页展开“手动连接”：\n'
+  printf '自动连接链接生成失败。请运行下面的命令显示管理登录令牌，再在管理页展开“手动连接”：\n'
   printf 'docker run --rm --user 10001:10001 --mount type=volume,source=%s,target=/run/secrets --entrypoint cat %s /run/secrets/proxy_access_token\n' \
     "$SECRETS_VOLUME" "$IMAGE_NAME"
 fi

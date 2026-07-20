@@ -184,9 +184,17 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b"showCreatedProxySecret" in script.content
     assert b"clearCreatedProxySecret" in script.content
     assert b"proxyKeyErrorMessage" in script.content
-    assert b'remove.disabled = busy || key.kind === "primary"' in script.content
-    assert "默认代理 Key 为系统保留，不可删除".encode() in script.content
-    assert b'if (key.kind === "primary")' in script.content
+    assert b"remove.disabled = busy;" in script.content
+    assert b"openProxyKeyTest" in script.content
+    assert b"startStatusPolling" in script.content
+    assert b"stopStatusPolling" in script.content
+    assert b'"/api/v1/ping"' in script.content
+    assert b'id="refresh-credits"' in shell.content
+    assert b'id="quota-pool-state"' in shell.content
+    assert b'id="proxy-key-test-dialog"' in shell.content
+    assert "管理登录令牌".encode() in shell.content
+    assert "不是 QVeris 控制台 API Key".encode() in shell.content
+    assert "在“代理 Key”中点击“创建 Key”".encode() in shell.content
     assert b".key-dialog" in stylesheet.content
     assert 'aria-label="接入应用"'.encode() in shell.content
     assert 'aria-label="复制全部接入配置"'.encode() in shell.content
@@ -230,6 +238,38 @@ async def test_admin_shell_and_assets_are_static_and_hardened() -> None:
     assert b".account-editor.edit-target" in stylesheet.content
     assert b".connection-value code:focus-visible" in stylesheet.content
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_admin_status_exposes_cached_quota_pool() -> None:
+    async def upstream(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    app = create_app(
+        make_settings(multiple_accounts=True, routing_mode="round_robin"),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        service = app.state.proxy_service
+        await service.state.save_quota_snapshot(
+            "account-a", 200, {"data.remaining_credits": 12}
+        )
+        await service.state.save_quota_snapshot(
+            "account-b", 200, {"data.remaining_credits": 8}
+        )
+        async with await app_client(app) as client:
+            response = await client.get("/admin/v1/accounts", headers=auth_headers())
+
+    assert response.status_code == 200
+    pool = response.json()["quota_pool"]
+    assert pool["total_available_credits"] == 20
+    assert pool["configured_accounts"] == 2
+    assert pool["included_accounts"] == 2
+    assert pool["complete"] is True
+    assert pool["partial"] is False
+    assert pool["stale"] is False
+    assert isinstance(pool["snapshot_at"], float)
+    assert pool["refresh_interval_seconds"] == 0
 
 
 def test_admin_browser_session_is_signed_secret_free_and_expiring() -> None:

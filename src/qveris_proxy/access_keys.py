@@ -37,10 +37,6 @@ class ProxyAccessKeyNotFound(ProxyAccessKeyError):
     code = "proxy_access_key_not_found"
 
 
-class PrimaryProxyAccessKeyRequired(ProxyAccessKeyError):
-    code = "primary_proxy_access_key_required"
-
-
 class ProxyAccessKeyRejected(ProxyAccessKeyError):
     code = "proxy_access_key_rejected"
 
@@ -103,7 +99,7 @@ class ProxyAccessKeyStore(Protocol):
         prefix: str,
         suffix: str,
         max_concurrency: int,
-    ) -> ProxyAccessKeyRecord: ...
+    ) -> ProxyAccessKeyRecord | None: ...
 
     async def create_proxy_access_key(
         self,
@@ -217,7 +213,7 @@ class ProxyAccessKeyManager:
 
     async def initialize(
         self, legacy_token: str, *, max_concurrency: int = 256
-    ) -> ProxyAccessKeyRecord:
+    ) -> ProxyAccessKeyRecord | None:
         self._validate_max_concurrency(max_concurrency)
         prefix, suffix = proxy_access_key_parts(legacy_token)
         async with self._lock:
@@ -227,7 +223,7 @@ class ProxyAccessKeyManager:
                 suffix=suffix,
                 max_concurrency=max_concurrency,
             )
-            return self._with_active_requests(key)
+            return self._with_active_requests(key) if key is not None else None
 
     async def create(
         self,
@@ -284,6 +280,27 @@ class ProxyAccessKeyManager:
             key = await self._store.get_proxy_access_key(key_id)
             if key is None:
                 raise ProxyAccessKeyNotFound("proxy access key not found")
+            return self._with_active_requests(key)
+
+    async def inspect(self, candidate: str) -> ProxyAccessKeyRecord:
+        secret_hash = hash_proxy_access_key(candidate)
+        async with self._lock:
+            eligibility = await self._store.inspect_proxy_access_key(secret_hash)
+            if not eligibility.accepted:
+                assert eligibility.reason is not None
+                raise ProxyAccessKeyRejected(
+                    eligibility.reason,
+                    retry_after=eligibility.retry_after,
+                    key_id=(
+                        eligibility.key.id if eligibility.key is not None else None
+                    ),
+                )
+            assert eligibility.key is not None
+            key = eligibility.key
+            if self._active_requests.get(key.id, 0) >= key.max_concurrency:
+                raise ProxyAccessKeyRejected(
+                    "concurrency", retry_after=1, key_id=key.id
+                )
             return self._with_active_requests(key)
 
     async def update(
@@ -349,10 +366,6 @@ class ProxyAccessKeyManager:
             current = await self._store.get_proxy_access_key(key_id)
             if current is None:
                 raise ProxyAccessKeyNotFound("proxy access key not found")
-            if current.kind == "primary":
-                raise PrimaryProxyAccessKeyRequired(
-                    "primary proxy access key is required"
-                )
             if not await self._store.delete_proxy_access_key(key_id):
                 raise ProxyAccessKeyNotFound("proxy access key not found")
             self._active_requests.pop(key_id, None)

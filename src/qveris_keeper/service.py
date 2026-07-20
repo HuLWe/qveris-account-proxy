@@ -262,6 +262,11 @@ class KeeperService:
                     observation,
                     login_succeeded=login_succeeded,
                     touched=observation.kind == "authenticated",
+                    reason=(
+                        "daily_checkin_claimed"
+                        if observation.kind == "authenticated"
+                        else None
+                    ),
                 )
             except ConfigurationError:
                 return await self._save_failure(managed, "secret_unavailable")
@@ -297,7 +302,9 @@ class KeeperService:
                 if status.next_action_at > current:
                     continue
                 if self._daily_touch_due(managed, current):
-                    actions.append(self.touch_account(account_id))
+                    if managed.config.daily_checkin_enabled:
+                        actions.append(self.touch_account(account_id))
+                    continue
                 elif (
                     status.last_probe_at is None
                     or status.last_probe_at + self.settings.probe_interval_seconds

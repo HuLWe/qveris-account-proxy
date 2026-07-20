@@ -226,18 +226,18 @@ async def test_vibe_style_requests_keep_control_default_without_pinning_tools() 
             )
 
     assert credits.status_code == 200
-    assert credits.json() == {
-        "status": "success",
-        "data": {
-            "remaining_credits": 200,
-            "total_available_credits": 200,
-        },
-        "proxy_pool": {
-            "configured_accounts": 2,
-            "included_accounts": 2,
-            "complete": True,
-        },
+    body = credits.json()
+    assert body["status"] == "success"
+    assert body["data"] == {
+        "remaining_credits": 200,
+        "total_available_credits": 200,
     }
+    assert body["proxy_pool"]["configured_accounts"] == 2
+    assert body["proxy_pool"]["included_accounts"] == 2
+    assert body["proxy_pool"]["complete"] is True
+    assert body["proxy_pool"]["partial"] is False
+    assert body["proxy_pool"]["stale"] is False
+    assert isinstance(body["proxy_pool"]["snapshot_at"], (int, float))
     assert usage.status_code == 200
     assert first_search.status_code == 200
     assert second_search.status_code == 200
@@ -290,18 +290,18 @@ async def test_credit_summary_keeps_official_fields_and_consumes_proxy_key_once(
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-qveris-api-version"] == QVERIS_API_VERSION
     assert "x-qveris-proxy-account" not in response.headers
-    assert response.json() == {
-        "status": "success",
-        "data": {
-            "remaining_credits": 20.5,
-            "total_available_credits": 20.5,
-        },
-        "proxy_pool": {
-            "configured_accounts": 2,
-            "included_accounts": 2,
-            "complete": True,
-        },
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["data"] == {
+        "remaining_credits": 20.5,
+        "total_available_credits": 20.5,
     }
+    assert body["proxy_pool"]["configured_accounts"] == 2
+    assert body["proxy_pool"]["included_accounts"] == 2
+    assert body["proxy_pool"]["complete"] is True
+    assert body["proxy_pool"]["partial"] is False
+    assert body["proxy_pool"]["stale"] is False
+    assert isinstance(body["proxy_pool"]["snapshot_at"], (int, float))
     assert "account-a" not in response.text
     assert "account-b" not in response.text
     assert KEY_A1 not in response.text
@@ -349,11 +349,13 @@ async def test_credit_summary_uses_available_accounts_and_keeps_explicit_routing
         "remaining_credits": 8,
         "total_available_credits": 8,
     }
-    assert summary.json()["proxy_pool"] == {
-        "configured_accounts": 2,
-        "included_accounts": 1,
-        "complete": False,
-    }
+    pool = summary.json()["proxy_pool"]
+    assert pool["configured_accounts"] == 2
+    assert pool["included_accounts"] == 1
+    assert pool["complete"] is False
+    assert pool["partial"] is True
+    assert pool["stale"] is False
+    assert isinstance(pool["snapshot_at"], (int, float))
     assert explicit.status_code == 200
     assert explicit.headers["x-qveris-proxy-account"] == "account-b"
     assert explicit.json() == {
@@ -394,6 +396,114 @@ async def test_credit_summary_returns_503_when_no_balance_is_available() -> None
     assert response.json() == {"detail": "QVeris credit balances are unavailable"}
     assert proxy_key.requests_used == 1
     assert proxy_key.active_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_credit_summary_reuses_fresh_snapshots_during_continuous_polling() -> None:
+    calls: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["authorization"])
+        remaining = 8 if request.headers["authorization"] == f"Bearer {KEY_B1}" else 12
+        return httpx.Response(200, json={"data": {"remaining_credits": remaining}})
+
+    app = create_app(
+        make_settings(
+            multiple_accounts=True,
+            routing_mode="round_robin",
+            quota_refresh_interval_seconds=900,
+        ),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+        ) as client:
+            responses = [
+                await client.get(
+                    "/api/v1/auth/credits", headers=auth_headers(account=None)
+                )
+                for _ in range(3)
+            ]
+
+    assert len(calls) <= 4
+    for response in responses:
+        assert response.status_code == 200
+        assert response.json()["proxy_pool"] == {
+            "configured_accounts": 2,
+            "included_accounts": 2,
+            "complete": True,
+            "partial": False,
+            "stale": False,
+            "snapshot_at": response.json()["proxy_pool"]["snapshot_at"],
+        }
+        assert isinstance(response.json()["proxy_pool"]["snapshot_at"], float)
+
+
+@pytest.mark.asyncio
+async def test_credit_summary_refreshes_only_expired_accounts_and_recovers() -> None:
+    now = [1_700_000_000.0]
+    calls: list[str] = []
+    account_a_recovers = False
+    account_a_attempts = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal account_a_recovers, account_a_attempts
+        authorization = request.headers["authorization"]
+        calls.append(authorization)
+        if authorization in {f"Bearer {KEY_A1}", f"Bearer {KEY_A2}"}:
+            account_a_attempts += 1
+            if not account_a_recovers:
+                return httpx.Response(200, json={"data": {"plan": "fixture"}})
+        remaining = 12 if authorization in {f"Bearer {KEY_A1}", f"Bearer {KEY_A2}"} else 8
+        return httpx.Response(200, json={"data": {"remaining_credits": remaining}})
+
+    app = create_app(
+        make_settings(
+            multiple_accounts=True,
+            routing_mode="round_robin",
+            quota_refresh_interval_seconds=60,
+        ),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with LifespanManager(app):
+        app.state.proxy_service.state._wall_time = lambda: now[0]
+        await app.state.proxy_service.state.save_quota_snapshot(
+            "account-a", 200, {"data.remaining_credits": 10}
+        )
+        now[0] += 30
+        await app.state.proxy_service.state.save_quota_snapshot(
+            "account-b", 200, {"data.remaining_credits": 8}
+        )
+        now[0] += 31
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+        ) as client:
+            partial = await client.get(
+                "/api/v1/auth/credits", headers=auth_headers(account=None)
+            )
+            account_a_recovers = True
+            now[0] += 60
+            recovered = await client.get(
+                "/api/v1/auth/credits", headers=auth_headers(account=None)
+            )
+
+    assert calls[:1] == [f"Bearer {KEY_A1}"]
+    assert partial.status_code == 200
+    assert partial.json()["data"]["remaining_credits"] == 18
+    assert partial.json()["proxy_pool"] == {
+        "configured_accounts": 2,
+        "included_accounts": 2,
+        "complete": False,
+        "partial": True,
+        "stale": True,
+            "snapshot_at": 1_700_000_061.0,
+    }
+    assert recovered.status_code == 200
+    assert recovered.json()["data"]["remaining_credits"] == 20
+    assert recovered.json()["proxy_pool"]["complete"] is True
+    assert recovered.json()["proxy_pool"]["partial"] is False
+    assert recovered.json()["proxy_pool"]["stale"] is False
 
 
 @pytest.mark.asyncio
@@ -460,6 +570,58 @@ async def test_429_cools_account_and_is_not_retried() -> None:
     assert second.headers["retry-after"] == "30"
     assert search.status_code == 200
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_auto_route_retries_read_only_provider_list_on_retryable_status() -> None:
+    accounts: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        account = request.headers["authorization"]
+        accounts.append(account)
+        if len(accounts) == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"providers": []})
+
+    app = create_app(
+        make_settings(multiple_accounts=True, routing_mode="round_robin"),
+        transport=httpx.MockTransport(upstream),
+    )
+    response = await request_app(
+        app,
+        "GET",
+        "/api/v1/providers",
+        headers=auth_headers(account=None),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"providers": []}
+    assert len(accounts) == 2
+
+
+@pytest.mark.asyncio
+async def test_auto_route_does_not_retry_ambiguous_timeout() -> None:
+    calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("ambiguous upstream result", request=request)
+
+    app = create_app(
+        make_settings(multiple_accounts=True, routing_mode="round_robin"),
+        transport=httpx.MockTransport(upstream),
+    )
+    response = await request_app(
+        app,
+        "POST",
+        "/api/v1/search",
+        headers=auth_headers(account=None),
+        json={"query": "weather"},
+    )
+
+    assert response.status_code == 504
+    assert calls == 1
 
 
 @pytest.mark.asyncio

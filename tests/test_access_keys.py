@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from qveris_proxy.access_keys import (
-    PrimaryProxyAccessKeyRequired,
     ProxyAccessKeyManager,
     ProxyAccessKeyRejected,
     generate_proxy_access_key,
@@ -127,10 +126,11 @@ async def test_primary_migration_rotates_only_secret_metadata_and_keeps_usage(
 
 
 @pytest.mark.asyncio
-async def test_managed_key_is_one_time_secret_and_primary_cannot_be_deleted(
+async def test_primary_key_can_be_deleted_without_reappearing_after_restart(
     tmp_path: Path,
 ) -> None:
-    store = StateStore(str(tmp_path / "state.db"))
+    state_path = tmp_path / "state.db"
+    store = StateStore(str(state_path))
     manager = make_manager(store)
     await manager.initialize(LEGACY_KEY)
 
@@ -142,11 +142,43 @@ async def test_managed_key_is_one_time_secret_and_primary_cannot_be_deleted(
     assert created.key.suffix == MANAGED_KEY[-4:]
     assert all(MANAGED_KEY not in repr(key) for key in await manager.list())
 
-    with pytest.raises(PrimaryProxyAccessKeyRequired):
-        await manager.delete("primary")
-    assert await store.delete_proxy_access_key("primary") is False
+    await manager.delete("primary")
+    assert [key.id for key in await manager.list()] == [created.key.id]
+    with pytest.raises(ProxyAccessKeyRejected) as deleted_primary:
+        await manager.acquire(LEGACY_KEY)
+    assert deleted_primary.value.reason == "invalid"
+
+    await store.close()
+    restarted_store = StateStore(str(state_path))
+    restarted_manager = make_manager(restarted_store)
+    assert await restarted_manager.initialize(LEGACY_KEY) is None
+    assert [key.id for key in await restarted_manager.list()] == [created.key.id]
+    with pytest.raises(ProxyAccessKeyRejected) as still_deleted:
+        await restarted_manager.acquire(LEGACY_KEY)
+    assert still_deleted.value.reason == "invalid"
+    await restarted_store.close()
+
+    standalone_store = StateStore(str(tmp_path / "standalone.db"))
+    standalone_manager = make_manager(standalone_store)
+    standalone_key = await standalone_manager.create("Disposable client")
+    await standalone_manager.delete(standalone_key.key.id)
+    assert await standalone_manager.list() == []
+    await standalone_store.close()
+
+
+@pytest.mark.asyncio
+async def test_inspecting_proxy_key_does_not_consume_usage(tmp_path: Path) -> None:
+    store = StateStore(str(tmp_path / "state.db"))
+    manager = make_manager(store)
+    created = await manager.create("Inspect")
+
+    inspected = await manager.inspect(created.secret)
+    assert inspected.id == created.key.id
+    assert inspected.requests_used == 0
+    assert (await manager.get(created.key.id)).requests_used == 0
+
     await manager.delete(created.key.id)
-    assert [key.id for key in await manager.list()] == ["primary"]
+    assert await manager.list() == []
     await store.close()
 
 

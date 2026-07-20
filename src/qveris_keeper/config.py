@@ -75,6 +75,7 @@ class BrowserAccountConfig(BaseModel):
     viewport: ViewportConfig
     user_agent: str = Field(min_length=20, max_length=512)
     headless: bool = True
+    daily_checkin_enabled: bool = True
     daily_touch_time: time = time(hour=6)
 
     @field_validator("id")
